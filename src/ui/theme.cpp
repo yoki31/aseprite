@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -104,6 +104,7 @@ PaintWidgetPartInfo::PaintWidgetPartInfo()
   styleFlags = 0;
   text = nullptr;
   mnemonic = 0;
+  icon = nullptr;
 }
 
 PaintWidgetPartInfo::PaintWidgetPartInfo(const Widget* widget)
@@ -114,6 +115,10 @@ PaintWidgetPartInfo::PaintWidgetPartInfo(const Widget* widget)
   styleFlags = PaintWidgetPartInfo::getStyleFlagsForWidget(widget);
   text = &widget->text();
   mnemonic = widget->mnemonic();
+  icon = nullptr;
+  if (const Style::Layer::IconSurfaceProvider* iconProvider = dynamic_cast<const Style::Layer::IconSurfaceProvider*>(widget)) {
+    icon = iconProvider->iconSurface();
+  }
 }
 
 // static
@@ -123,7 +128,8 @@ int PaintWidgetPartInfo::getStyleFlagsForWidget(const Widget* widget)
     (widget->isEnabled() ? 0: Style::Layer::kDisabled) |
     (widget->isSelected() ? Style::Layer::kSelected: 0) |
     (widget->hasMouse() ? Style::Layer::kMouse: 0) |
-    (widget->hasFocus() ? Style::Layer::kFocus: 0);
+    (widget->hasFocus() ? Style::Layer::kFocus: 0) |
+    (widget->hasCapture() ? Style::Layer::kCapture: 0);
 }
 
 Theme::Theme()
@@ -201,7 +207,7 @@ void Theme::paintWidgetPart(Graphics* g,
     (const Style::Layer& layer) {
       paintLayer(g, style, layer,
                  (info.text ? *info.text: std::string()),
-                 info.mnemonic, rc, outBgColor);
+                 info.mnemonic, info.icon, rc, outBgColor);
     });
 }
 
@@ -245,7 +251,7 @@ void Theme::paintTooltip(Graphics* g,
     paintWidget(g, widget, style, bounds);
 
   // Draw arrow
-  if (arrowStyle) {
+  if (arrowStyle && arrowAlign) {
     gfx::Size topLeft;
     gfx::Size center;
     gfx::Size bottomRight;
@@ -294,11 +300,31 @@ void Theme::paintTooltip(Graphics* g,
   }
 }
 
+void Theme::paintTextBoxWithStyle(Graphics* g,
+                                  const Widget* widget)
+{
+  gfx::Color bg = gfx::ColorNone, fg = gfx::ColorNone;
+
+  for_each_layer(
+    PaintWidgetPartInfo::getStyleFlagsForWidget(widget),
+    widget->style(),
+    [&fg, &bg](const Style::Layer& layer) {
+      switch (layer.type()) {
+        case Style::Layer::Type::kBackground: bg = layer.color(); break;
+        case Style::Layer::Type::kText:       fg = layer.color(); break;
+      }
+    });
+
+  if (fg != gfx::ColorNone)
+    Theme::drawTextBox(g, widget, nullptr, nullptr, bg, fg);
+}
+
 void Theme::paintLayer(Graphics* g,
                        const Style* style,
                        const Style::Layer& layer,
                        const std::string& text,
                        const int mnemonic,
+                       os::Surface* providedIcon,
                        gfx::Rect& rc,
                        gfx::Color& bgColor)
 {
@@ -424,27 +450,35 @@ void Theme::paintLayer(Graphics* g,
         else {
           gfx::Size textSize = g->measureUIText(text);
           gfx::Point pt;
+          gfx::Border undef = Style::UndefinedBorder();
+          gfx::Border padding = style->padding();
+          if (padding.left() == undef.left()) padding.left(0);
+          if (padding.right() == undef.right()) padding.right(0);
+          if (padding.top() == undef.top()) padding.top(0);
+          if (padding.bottom() == undef.bottom()) padding.bottom(0);
 
           if (layer.align() & LEFT)
-            pt.x = rc.x;
+            pt.x = rc.x+padding.left();
           else if (layer.align() & RIGHT)
-            pt.x = rc.x+rc.w-textSize.w;
-          else
-            pt.x = rc.x+rc.w/2-textSize.w/2;
+            pt.x = rc.x+rc.w-textSize.w-padding.right();
+          else {
+            pt.x = CALC_FOR_CENTER(rc.x+padding.left(), rc.w-padding.width(), textSize.w);
+          }
 
           if (layer.align() & TOP)
-            pt.y = rc.y;
+            pt.y = rc.y+padding.top();
           else if (layer.align() & BOTTOM)
-            pt.y = rc.y+rc.h-textSize.h;
-          else
-            pt.y = rc.y+rc.h/2-textSize.h/2;
+            pt.y = rc.y+rc.h-textSize.h-padding.bottom();
+          else {
+            pt.y = CALC_FOR_CENTER(rc.y+padding.top(), rc.h-padding.height(), textSize.h);
+          }
 
           pt += layer.offset();
 
           g->drawUIText(text,
                         layer.color(),
                         bgColor,
-                        pt, mnemonic);
+                        pt, style->mnemonics() ? mnemonic : 0);
         }
 
         if (style->font())
@@ -453,24 +487,32 @@ void Theme::paintLayer(Graphics* g,
       break;
 
     case Style::Layer::Type::kIcon: {
-      os::Surface* icon = layer.icon();
+      os::Surface* icon = providedIcon ? providedIcon : layer.icon();
       if (icon) {
         gfx::Size iconSize(icon->width(), icon->height());
         gfx::Point pt;
+        gfx::Border undef = Style::UndefinedBorder();
+        gfx::Border padding = style->padding();
+        if (padding.left() == undef.left()) padding.left(0);
+        if (padding.right() == undef.right()) padding.right(0);
+        if (padding.top() == undef.top()) padding.top(0);
+        if (padding.bottom() == undef.bottom()) padding.bottom(0);
 
         if (layer.align() & LEFT)
-          pt.x = rc.x;
+          pt.x = rc.x+padding.left();
         else if (layer.align() & RIGHT)
-          pt.x = rc.x+rc.w-iconSize.w;
-        else
-          pt.x = rc.x+rc.w/2-iconSize.w/2;
+          pt.x = rc.x+rc.w-iconSize.w-padding.right();
+        else {
+          pt.x = CALC_FOR_CENTER(rc.x+padding.left(), rc.w-padding.width(), iconSize.w);
+        }
 
         if (layer.align() & TOP)
-          pt.y = rc.y;
+          pt.y = rc.y+padding.top();
         else if (layer.align() & BOTTOM)
-          pt.y = rc.y+rc.h-iconSize.h;
-        else
-          pt.y = rc.y+rc.h/2-iconSize.h/2;
+          pt.y = rc.y+rc.h-iconSize.h-padding.bottom();
+        else {
+          pt.y = CALC_FOR_CENTER(rc.y+padding.top(), rc.h-padding.height(), iconSize.h);
+        }
 
         pt += layer.offset();
 
@@ -559,7 +601,11 @@ void Theme::measureLayer(const Widget* widget,
       break;
 
     case Style::Layer::Type::kIcon: {
-      os::Surface* icon = layer.icon();
+      const os::Surface* icon = layer.icon();
+      if (const Style::Layer::IconSurfaceProvider* iconProvider = dynamic_cast<const Style::Layer::IconSurfaceProvider*>(widget)) {
+        icon = iconProvider->iconSurface() ? iconProvider->iconSurface() : icon;
+      }
+
       if (icon) {
         iconHint.w = std::max(iconHint.w, icon->width()+ABS(layer.offset().x));
         iconHint.h = std::max(iconHint.h, icon->height()+ABS(layer.offset().y));
@@ -631,6 +677,34 @@ gfx::Color Theme::calcBgColor(const Widget* widget,
   return bgColor;
 }
 
+gfx::Size Theme::calcMinSize(const Widget* widget,
+                              const Style* style)
+{
+  ASSERT(widget);
+  ASSERT(style);
+
+  gfx::Size sz = widget->minSize();
+
+  if (sz.w == 0) sz.w = style->minSize().w;
+  if (sz.h == 0) sz.h = style->minSize().h;
+
+  return sz;
+}
+
+gfx::Size Theme::calcMaxSize(const Widget* widget,
+                              const Style* style)
+{
+  ASSERT(widget);
+  ASSERT(style);
+
+  gfx::Size sz = widget->maxSize();
+
+  if (sz.w == std::numeric_limits<int>::max()) sz.w = style->maxSize().w;
+  if (sz.h == std::numeric_limits<int>::max()) sz.h = style->maxSize().h;
+
+  return sz;
+}
+
 void Theme::calcWidgetMetrics(const Widget* widget,
                               const Style* style,
                               gfx::Size& sizeHint,
@@ -686,6 +760,9 @@ void Theme::calcWidgetMetrics(const Widget* widget,
     sizeHint.h += std::max(textHint.h, iconHint.h);
   else
     sizeHint.h += textHint.h + iconHint.h;
+
+  sizeHint.w = std::clamp(sizeHint.w, widget->minSize().w, widget->maxSize().w);
+  sizeHint.h = std::clamp(sizeHint.h, widget->minSize().h, widget->maxSize().h);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -738,13 +815,11 @@ void Theme::drawSlices(Graphics* g, os::Surface* sheet,
 {
   Paint paint;
   paint.color(color);
-  if (!drawCenter)
-    paint.setFlags(Paint::kNineWithoutCenter);
-  g->drawSurfaceNine(sheet, sprite, slices, rc, &paint);
+  g->drawSurfaceNine(sheet, sprite, slices, rc, drawCenter, &paint);
 }
 
 // static
-void Theme::drawTextBox(Graphics* g, Widget* widget,
+void Theme::drawTextBox(Graphics* g, const Widget* widget,
                         int* w, int* h, gfx::Color bg, gfx::Color fg)
 {
   View* view = (g ? View::getView(widget): nullptr);

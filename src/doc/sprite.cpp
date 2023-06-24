@@ -1,5 +1,5 @@
 // Aseprite Document Library
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -11,18 +11,21 @@
 
 #include "doc/sprite.h"
 
-#include "base/clamp.h"
 #include "base/memory.h"
 #include "base/remove_from_container.h"
 #include "doc/cel.h"
 #include "doc/cels_range.h"
 #include "doc/image_impl.h"
 #include "doc/layer.h"
+#include "doc/layer_tilemap.h"
+#include "doc/octree_map.h"
 #include "doc/palette.h"
 #include "doc/primitives.h"
 #include "doc/remap.h"
-#include "doc/rgbmap.h"
+#include "doc/render_plan.h"
+#include "doc/rgbmap_rgb5a3.h"
 #include "doc/tag.h"
+#include "doc/tilesets.h"
 
 #include <algorithm>
 #include <cstring>
@@ -31,9 +34,7 @@
 
 namespace doc {
 
-//////////////////////////////////////////////////////////////////////
-// Constructors/Destructor
-
+static RgbMapAlgorithm g_rgbMapAlgorithm = RgbMapAlgorithm::DEFAULT;
 static gfx::Rect g_defaultGridBounds(0, 0, 16, 16);
 
 // static
@@ -48,9 +49,24 @@ void Sprite::SetDefaultGridBounds(const gfx::Rect& defGridBounds)
   g_defaultGridBounds = defGridBounds;
 }
 
+// static
+RgbMapAlgorithm Sprite::DefaultRgbMapAlgorithm()
+{
+  return g_rgbMapAlgorithm;
+}
+
+// static
+void Sprite::SetDefaultRgbMapAlgorithm(const RgbMapAlgorithm mapAlgo)
+{
+  g_rgbMapAlgorithm = mapAlgo;
+}
+
+//////////////////////////////////////////////////////////////////////
+// Constructors/Destructor
+
 Sprite::Sprite(const ImageSpec& spec,
                int ncolors)
-  : Object(ObjectType::Sprite)
+  : WithUserData(ObjectType::Sprite)
   , m_document(nullptr)
   , m_spec(spec)
   , m_pixelRatio(1, 1)
@@ -58,9 +74,9 @@ Sprite::Sprite(const ImageSpec& spec,
   , m_frlens(1, 100)            // First frame with 100 msecs of duration
   , m_root(new LayerGroup(this))
   , m_gridBounds(Sprite::DefaultGridBounds())
-  , m_rgbMap(nullptr)           // Initial RGB map
   , m_tags(this)
   , m_slices(this)
+  , m_tilesets(nullptr)
 {
   // Generate palette
   switch (spec.colorMode()) {
@@ -77,7 +93,7 @@ Sprite::Sprite(const ImageSpec& spec,
     case ColorMode::BITMAP:
       for (int c=0; c<ncolors; c++) {
         int g = 255 * c / (ncolors-1);
-        g = base::clamp(g, 0, 255);
+        g = std::clamp(g, 0, 255);
         pal.setEntry(c, rgba(g, g, g, 255));
       }
       break;
@@ -91,6 +107,9 @@ Sprite::~Sprite()
   // Destroy layers
   delete m_root;
 
+  // Destroy tilesets
+  delete m_tilesets;
+
   // Destroy palettes
   {
     PalettesList::iterator end = m_palettes.end();
@@ -98,9 +117,6 @@ Sprite::~Sprite()
     for (; it != end; ++it)
       delete *it;               // palette
   }
-
-  // Destroy RGB map
-  delete m_rgbMap;
 }
 
 // static
@@ -204,19 +220,27 @@ void Sprite::setTransparentColor(color_t color)
   m_spec.setMaskColor(color);
 
   // Change the mask color of all images.
-  std::vector<Image*> images;
+  std::vector<ImageRef> images;
   getImages(images);
-  for (Image* image : images)
+  for (ImageRef& image : images)
     image->setMaskColor(color);
+
+  // Transform the empty tile of all tilemaps
+  if (hasTilesets()) {
+    for (Tileset* tileset : *tilesets()) {
+      if (tileset)
+        tileset->notifyRegenerateEmptyTile();
+    }
+  }
 }
 
 int Sprite::getMemSize() const
 {
   int size = 0;
 
-  std::vector<Image*> images;
+  std::vector<ImageRef> images;
   getImages(images);
-  for (Image* image : images)
+  for (const ImageRef& image : images)
     size += image->getRowStrideSize() * image->height();
 
   return size;
@@ -351,27 +375,51 @@ void Sprite::deletePalette(frame_t frame)
   }
 }
 
-RgbMap* Sprite::rgbMap(frame_t frame) const
+Sprite::RgbMapFor Sprite::rgbMapForSprite() const
 {
-  return rgbMap(frame, backgroundLayer() ? RgbMapFor::OpaqueLayer:
-                                           RgbMapFor::TransparentLayer);
+  return backgroundLayer() ? RgbMapFor::OpaqueLayer:
+                             RgbMapFor::TransparentLayer;
 }
 
-RgbMap* Sprite::rgbMap(frame_t frame, RgbMapFor forLayer) const
+RgbMap* Sprite::rgbMap(const frame_t frame) const
 {
-  int maskIndex = (forLayer == RgbMapFor::OpaqueLayer ?
-                   -1: transparentColor());
+  return rgbMap(frame, rgbMapForSprite());
+}
 
-  if (m_rgbMap == NULL) {
-    m_rgbMap = new RgbMap();
-    m_rgbMap->regenerate(palette(frame), maskIndex);
-  }
-  else if (!m_rgbMap->match(palette(frame)) ||
-           m_rgbMap->maskIndex() != maskIndex) {
-    m_rgbMap->regenerate(palette(frame), maskIndex);
-  }
+RgbMap* Sprite::rgbMap(const frame_t frame,
+                       const RgbMapFor forLayer) const
+{
+  return rgbMap(frame,
+                forLayer,
+                g_rgbMapAlgorithm);
+}
 
-  return m_rgbMap;
+RgbMap* Sprite::rgbMap(const frame_t frame,
+                       const RgbMapFor forLayer,
+                       RgbMapAlgorithm mapAlgo) const
+{
+  if (!m_rgbMap || m_rgbMapAlgorithm != mapAlgo) {
+    m_rgbMapAlgorithm = mapAlgo;
+    switch (m_rgbMapAlgorithm) {
+      case RgbMapAlgorithm::RGB5A3: m_rgbMap.reset(new RgbMapRGB5A3); break;
+      case RgbMapAlgorithm::DEFAULT:
+      case RgbMapAlgorithm::OCTREE: m_rgbMap.reset(new OctreeMap); break;
+      default:
+        m_rgbMap.reset(nullptr);
+        ASSERT(false);
+        return nullptr;
+    }
+  }
+  int maskIndex;
+  if (forLayer == RgbMapFor::OpaqueLayer)
+    maskIndex = -1;
+  else {
+    maskIndex = palette(frame)->findMaskColor();
+    if (maskIndex == -1)
+      maskIndex = 0;
+  }
+  m_rgbMap->regenerateMap(palette(frame), maskIndex);
+  return m_rgbMap.get();
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -430,29 +478,41 @@ int Sprite::totalAnimationDuration() const
 void Sprite::setFrameDuration(frame_t frame, int msecs)
 {
   if (frame >= 0 && frame < m_frames)
-    m_frlens[frame] = base::clamp(msecs, 1, 65535);
+    m_frlens[frame] = std::clamp(msecs, 1, 65535);
 }
 
 void Sprite::setFrameRangeDuration(frame_t from, frame_t to, int msecs)
 {
   std::fill(
     m_frlens.begin()+(std::size_t)from,
-    m_frlens.begin()+(std::size_t)to+1, base::clamp(msecs, 1, 65535));
+    m_frlens.begin()+(std::size_t)to+1, std::clamp(msecs, 1, 65535));
 }
 
 void Sprite::setDurationForAllFrames(int msecs)
 {
-  std::fill(m_frlens.begin(), m_frlens.end(), base::clamp(msecs, 1, 65535));
+  std::fill(m_frlens.begin(), m_frlens.end(), std::clamp(msecs, 1, 65535));
 }
 
 //////////////////////////////////////////////////////////////////////
-// Shared Images and CelData (for linked Cels)
+// Shared Images and CelData (for linked cels and tilesets)
 
 ImageRef Sprite::getImageRef(ObjectId imageId)
 {
   for (Cel* cel : cels()) {
     if (cel->image()->id() == imageId)
       return cel->imageRef();
+  }
+  if (hasTilesets()) {
+    for (Tileset* tileset : *tilesets()) {
+      if (!tileset)
+        continue;
+
+      for (tile_index i=0; i<tileset->size(); ++i) {
+        ImageRef image = tileset->get(i);
+        if (image && image->id() == imageId)
+          return image;
+      }
+    }
   }
   return ImageRef(nullptr);
 }
@@ -473,26 +533,90 @@ void Sprite::replaceImage(ObjectId curImageId, const ImageRef& newImage)
 {
   for (Cel* cel : cels()) {
     if (cel->image()->id() == curImageId)
-      cel->data()->setImage(newImage);
+      cel->data()->setImage(newImage, cel->layer());
+  }
+
+  if (hasTilesets()) {
+    for (Tileset* tileset : *tilesets()) {
+      if (!tileset)
+        continue;
+
+      for (tile_index i=0; i<tileset->size(); ++i) {
+        ImageRef image = tileset->get(i);
+        if (image && image->id() == curImageId) {
+          // Change only the tile image (not its user data)
+          tileset->set(i, newImage);
+        }
+      }
+    }
+  }
+}
+
+void Sprite::replaceTileset(tileset_index tsi, Tileset* newTileset)
+{
+  ASSERT(hasTilesets());
+
+  tilesets()->set(tsi, newTileset);
+
+  for (Layer* layer : allLayers()) {
+    if (layer->isTilemap() &&
+        static_cast<LayerTilemap*>(layer)->tilesetIndex() == tsi) {
+      // Set same index just to update the internal tileset pointer in
+      // LayerTilemap
+      static_cast<LayerTilemap*>(layer)->setTilesetIndex(tsi);
+    }
   }
 }
 
 // TODO replace it with a images iterator
-void Sprite::getImages(std::vector<Image*>& images) const
+void Sprite::getImages(std::vector<ImageRef>& images) const
 {
-  for (const auto& cel : uniqueCels())
-    images.push_back(cel->image());
+  for (Cel* cel : uniqueCels())
+    if (cel->image()->pixelFormat() != IMAGE_TILEMAP)
+      images.push_back(cel->imageRef());
+
+  if (hasTilesets()) {
+    for (Tileset* tileset : *tilesets()) {
+      if (!tileset)
+        continue;
+
+      for (tile_index i=0; i<tileset->size(); ++i) {
+        ImageRef image = tileset->get(i);
+        if (image)
+          images.push_back(image);
+      }
+    }
+  }
 }
 
-void Sprite::remapImages(frame_t frameFrom, frame_t frameTo, const Remap& remap)
+void Sprite::getTilemapsByTileset(const Tileset* tileset,
+                                  std::vector<ImageRef>& images) const
+{
+  for (const Cel* cel : uniqueCels()) {
+    if (cel->layer()->isTilemap() &&
+        static_cast<LayerTilemap*>(cel->layer())->tileset() == tileset) {
+      images.push_back(cel->imageRef());
+    }
+  }
+}
+
+void Sprite::remapImages(const Remap& remap)
 {
   ASSERT(pixelFormat() == IMAGE_INDEXED);
   //ASSERT(remap.size() == 256);
 
-  for (const Cel* cel : uniqueCels()) {
-    // Remap this Cel because is inside the specified range
-    if (cel->frame() >= frameFrom &&
-        cel->frame() <= frameTo) {
+  std::vector<ImageRef> images;
+  getImages(images);
+  for (ImageRef& image : images)
+    remap_image(image.get(), remap);
+}
+
+void Sprite::remapTilemaps(const Tileset* tileset,
+                           const Remap& remap)
+{
+  for (Cel* cel : uniqueCels()) {
+    if (cel->layer()->isTilemap() &&
+        static_cast<LayerTilemap*>(cel->layer())->tileset() == tileset) {
       remap_image(cel->image(), remap);
     }
   }
@@ -501,21 +625,16 @@ void Sprite::remapImages(frame_t frameFrom, frame_t frameTo, const Remap& remap)
 //////////////////////////////////////////////////////////////////////
 // Drawing
 
-void Sprite::pickCels(const double x,
-                      const double y,
-                      const frame_t frame,
+void Sprite::pickCels(const gfx::PointF& pos,
                       const int opacityThreshold,
-                      const LayerList& layers,
+                      const RenderPlan& plan,
                       CelList& cels) const
 {
-  gfx::PointF pos(x, y);
-
-  for (int i=(int)layers.size()-1; i>=0; --i) {
-    const Layer* layer = layers[i];
-    if (!layer->isImage())
-      continue;
-
-    Cel* cel = layer->cel(frame);
+  // Iterate cels in reversed order (from the front-most to the
+  // bottom-most) so we pick first visible cel in the given position.
+  const auto& planItems = plan.items();
+  for (auto it=planItems.rbegin(), end=planItems.rend(); it!=end; ++it) {
+    const Cel* cel = it->cel;
     if (!cel)
       continue;
 
@@ -532,9 +651,35 @@ void Sprite::pickCels(const double x,
     if (!celBounds.contains(pos))
       continue;
 
-    const gfx::Point ipos(
-      int((pos.x-celBounds.x)*image->width()/celBounds.w),
-      int((pos.y-celBounds.y)*image->height()/celBounds.h));
+    gfx::Point ipos;
+    if (image->isTilemap()) {
+      Tileset* tileset = static_cast<LayerTilemap*>(cel->layer())->tileset();
+      if (!tileset)
+        continue;
+
+      const Grid grid = cel->grid();
+
+      tile_t tile = notile;
+      gfx::Point tilePos = grid.canvasToTile(gfx::Point(pos));
+      if (image->bounds().contains(tilePos.x, tilePos.y))
+        tile = image->getPixel(tilePos.x, tilePos.y);
+      if (tile == notile)
+        continue;
+
+      image = tileset->get(tile).get();
+      if (!image)
+        continue;
+
+      gfx::Point tileStart = grid.tileToCanvas(tilePos);
+      ipos = gfx::Point(pos.x - tileStart.x,
+                        pos.y - tileStart.y);
+    }
+    else {
+      ipos = gfx::Point(
+        int((pos.x-celBounds.x)*image->width()/celBounds.w),
+        int((pos.y-celBounds.y)*image->height()/celBounds.h));
+    }
+
     if (!image->bounds().contains(ipos))
       continue;
 
@@ -556,7 +701,7 @@ void Sprite::pickCels(const double x,
     if (!isOpaque)
       continue;
 
-    cels.push_back(cel);
+    cels.push_back(const_cast<Cel*>(cel));
   }
 }
 
@@ -605,6 +750,11 @@ CelsRange Sprite::cels(frame_t frame) const
   return CelsRange(this, selFrames);
 }
 
+CelsRange Sprite::cels(const SelectedFrames& selFrames) const
+{
+  return CelsRange(this, selFrames, CelsRange::ALL);
+}
+
 CelsRange Sprite::uniqueCels() const
 {
   SelectedFrames selFrames;
@@ -615,6 +765,16 @@ CelsRange Sprite::uniqueCels() const
 CelsRange Sprite::uniqueCels(const SelectedFrames& selFrames) const
 {
   return CelsRange(this, selFrames, CelsRange::UNIQUE);
+}
+
+////////////////////////////////////////
+// Tilesets
+
+Tilesets* Sprite::tilesets() const
+{
+  if (!m_tilesets)
+    m_tilesets = new Tilesets;
+  return m_tilesets;
 }
 
 } // namespace doc

@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -20,6 +20,7 @@ namespace os {
 }
 
 namespace ui {
+  class Display;
 
   class Overlay;
   using OverlayRef = base::Ref<Overlay>;
@@ -31,7 +32,8 @@ namespace ui {
       MouseZOrder = 5000
     };
 
-    Overlay(const os::SurfaceRef& overlaySurface,
+    Overlay(Display* display,
+            const os::SurfaceRef& overlaySurface,
             const gfx::Point& pos,
             ZOrder zorder = NormalZOrder);
     ~Overlay();
@@ -41,7 +43,7 @@ namespace ui {
     const gfx::Point& position() const { return m_pos; }
     gfx::Rect bounds() const;
 
-    void captureOverlappedArea(os::Surface* screen);
+    void captureOverlappedArea();
     void restoreOverlappedArea(const gfx::Rect& restoreBounds);
 
     void drawOverlay();
@@ -52,12 +54,13 @@ namespace ui {
     }
 
   private:
+    Display* m_display;
     os::SurfaceRef m_surface;
     os::SurfaceRef m_overlap;
 
     // Surface where we captured the overlapped (m_overlap)
     // region. It's nullptr if the overlay wasn't drawn yet.
-    os::Surface* m_captured;
+    os::SurfaceRef m_captured;
 
     gfx::Point m_pos;
     ZOrder m_zorder;

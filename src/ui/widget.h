@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -29,6 +29,7 @@
 
 namespace ui {
 
+  class Display;
   class InitThemeEvent;
   class KeyMessage;
   class LoadLayoutEvent;
@@ -151,7 +152,7 @@ namespace ui {
     Theme* theme() const { return m_theme; }
     Style* style() const { return m_style; }
     void setTheme(Theme* theme);
-    void setStyle(Style* style);
+    virtual void setStyle(Style* style);
     void initTheme();
 
     // ===============================================================
@@ -160,7 +161,9 @@ namespace ui {
 
     Window* window() const;
     Widget* parent() const { return m_parent; }
+    int parentIndex() const { return m_parentIndex; }
     Manager* manager() const;
+    Display* display() const;
 
     // Returns a list of children.
     const WidgetsList& children() const { return m_children; }
@@ -183,22 +186,24 @@ namespace ui {
 
     Widget* pick(const gfx::Point& pt,
                  const bool checkParentsVisibility = true) const;
+    virtual Widget* pickFromScreenPos(const gfx::Point& screenPos) const;
+
     bool hasChild(Widget* child);
     bool hasAncestor(Widget* ancestor);
-    Widget* findChild(const char* id);
+    Widget* findChild(const char* id) const;
 
     // Returns a widget in the same window that is located "sibling".
-    Widget* findSibling(const char* id);
+    Widget* findSibling(const char* id) const;
 
     // Finds a child with the specified ID and dynamic-casts it to type
     // T.
     template<class T>
-    T* findChildT(const char* id) {
+    T* findChildT(const char* id) const {
       return dynamic_cast<T*>(findChild(id));
     }
 
     template<class T>
-    T* findFirstChildByType() {
+    T* findFirstChildByType() const {
       for (auto child : m_children) {
         if (T* specificChild = dynamic_cast<T*>(child))
           return specificChild;
@@ -238,6 +243,9 @@ namespace ui {
     gfx::Rect childrenBounds() const;
     gfx::Rect clientChildrenBounds() const;
 
+    // Bounds of this widget or window on native screen/desktop coordinates.
+    gfx::Rect boundsOnScreen() const;
+
     // Sets the bounds of the widget generating a onResize() event.
     void setBounds(const gfx::Rect& rc);
 
@@ -252,6 +260,9 @@ namespace ui {
     const gfx::Size& maxSize() const { return m_maxSize; }
     void setMinSize(const gfx::Size& sz);
     void setMaxSize(const gfx::Size& sz);
+    void setMinMaxSize(const gfx::Size& minSz, const gfx::Size& maxSz);
+    void resetMinSize();
+    void resetMaxSize();
 
     const gfx::Border& border() const { return m_border; }
     void setBorder(const gfx::Border& border);
@@ -316,7 +327,8 @@ namespace ui {
     bool sendMessage(Message* msg);
     void closeWindow();
 
-    void broadcastMouseMessage(WidgetsList& targets);
+    void broadcastMouseMessage(const gfx::Point& screenPos,
+                               WidgetsList& targets);
 
     // ===============================================================
     // SIZE & POSITION
@@ -340,7 +352,19 @@ namespace ui {
     bool hasFocus() const { return hasFlags(HAS_FOCUS); }
     bool hasMouse() const { return hasFlags(HAS_MOUSE); }
     bool hasCapture() const { return hasFlags(HAS_CAPTURE); }
+
+    // Checking if the mouse is currently above the widget.
     bool hasMouseOver() const;
+
+    // Returns the mouse position relative to the top-left corner of
+    // the ui::Display's client area/content rect.
+    gfx::Point mousePosInDisplay() const;
+
+    // Returns the mouse position relative to the top-left cornder of
+    // the widget bounds.
+    gfx::Point mousePosInClientBounds() const {
+      return toClient(mousePosInDisplay());
+    }
 
     // Offer the capture to widgets of the given type. Returns true if
     // the capture was passed to other widget.
@@ -348,14 +372,23 @@ namespace ui {
 
     // Returns lower-case letter that represet the mnemonic of the widget
     // (the underscored character, i.e. the letter after & symbol).
-    int mnemonic() const { return m_mnemonic; }
-    void setMnemonic(int mnemonic);
+    int mnemonic() const {
+      return (m_mnemonic & kMnemonicCharMask);
+    }
+    bool mnemonicRequiresModifiers() const {
+      return (m_mnemonic & kMnemonicModifiersMask ? true: false);
+    }
+    void setMnemonic(const int mnemonic,
+                     const bool requireModifiers);
 
     // Assigns mnemonic from the character preceded by the given
     // escapeChar ('&' by default).
-    void processMnemonicFromText(int escapeChar = '&');
+    void processMnemonicFromText(const int escapeChar = '&',
+                                 const bool requireModifiers = true);
 
-    // Returns true if the mnemonic character is pressed.
+    // Returns true if the mnemonic character is pressed (without modifiers).
+    // TODO maybe we can add check for modifiers now that this
+    //      information is included in the Widget
     bool isMnemonicPressed(const ui::KeyMessage* keyMsg) const;
 
     // Signals
@@ -378,7 +411,8 @@ namespace ui {
     virtual void onSaveLayout(SaveLayoutEvent& ev);
     virtual void onResize(ResizeEvent& ev);
     virtual void onPaint(PaintEvent& ev);
-    virtual void onBroadcastMouseMessage(WidgetsList& targets);
+    virtual void onBroadcastMouseMessage(const gfx::Point& screenPos,
+                                         WidgetsList& targets);
     virtual void onInitTheme(InitThemeEvent& ev);
     virtual void onSetDecorativeWidgetBounds();
     virtual void onVisible(bool visible);
@@ -390,7 +424,7 @@ namespace ui {
     virtual double onGetTextDouble() const;
 
   private:
-    void removeChild(WidgetsList::iterator& it);
+    void removeChild(const WidgetsList::iterator& it);
     void paint(Graphics* graphics,
                const gfx::Region& drawRegion,
                const bool isBg);
@@ -410,8 +444,16 @@ namespace ui {
     gfx::Region m_updateRegion;   // Region to be redrawed.
     WidgetsList m_children;       // Sub-widgets
     Widget* m_parent;             // Who is the parent?
+    int m_parentIndex;            // Location/index of this widget in the parent's Widget::m_children vector
     gfx::Size* m_sizeHint;
-    int m_mnemonic;               // Keyboard shortcut to access this widget like Alt+mnemonic
+
+    // Keyboard shortcut to access this widget like Alt+mnemonic.  If
+    // kMnemonicModifiersMask bit is zero, it means that the mnemonic
+    // can be used without Alt or Command key modifiers (useful for
+    // buttons in ui::Alert).
+    static constexpr int kMnemonicCharMask = 0x7f;
+    static constexpr int kMnemonicModifiersMask = 0x80;
+    int m_mnemonic;
 
     // Widget size limits
     gfx::Size m_minSize, m_maxSize;

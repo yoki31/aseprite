@@ -1,4 +1,5 @@
 // Aseprite Document Library
+// Copyright (c) 2019 Igara Studio S.A.
 // Copyright (c) 2001-2018 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -18,6 +19,7 @@
 #include "doc/image_io.h"
 #include "doc/layer.h"
 #include "doc/layer_io.h"
+#include "doc/layer_tilemap.h"
 #include "doc/sprite.h"
 #include "doc/string_io.h"
 #include "doc/subobjects_io.h"
@@ -44,7 +46,8 @@ void write_layer(std::ostream& os, const Layer* layer)
 
   switch (layer->type()) {
 
-    case ObjectType::LayerImage: {
+    case ObjectType::LayerImage:
+    case ObjectType::LayerTilemap: {
       const LayerImage* imgLayer = static_cast<const LayerImage*>(layer);
       CelConstIterator it, begin = imgLayer->getCelBegin();
       CelConstIterator end = imgLayer->getCelEnd();
@@ -57,7 +60,7 @@ void write_layer(std::ostream& os, const Layer* layer)
       int images = 0;
       int celdatas = 0;
       for (it=begin; it != end; ++it) {
-        Cel* cel = *it;
+        const Cel* cel = *it;
         if (!cel->link()) {
           ++images;
           ++celdatas;
@@ -66,14 +69,14 @@ void write_layer(std::ostream& os, const Layer* layer)
 
       write16(os, images);
       for (it=begin; it != end; ++it) {
-        Cel* cel = *it;
+        const Cel* cel = *it;
         if (!cel->link())
           write_image(os, cel->image());
       }
 
       write16(os, celdatas);
       for (it=begin; it != end; ++it) {
-        Cel* cel = *it;
+        const Cel* cel = *it;
         if (!cel->link())
           write_celdata(os, cel->dataRef().get());
       }
@@ -83,6 +86,12 @@ void write_layer(std::ostream& os, const Layer* layer)
       for (it=begin; it != end; ++it) {
         const Cel* cel = *it;
         write_cel(os, cel);
+      }
+
+      // Save tilemap data
+      if (layer->type() == ObjectType::LayerTilemap) {
+        // Tileset index
+        write32(os, static_cast<const LayerTilemap*>(layer)->tilesetIndex());
       }
       break;
     }
@@ -101,7 +110,7 @@ void write_layer(std::ostream& os, const Layer* layer)
   write_user_data(os, layer->userData());
 }
 
-Layer* read_layer(std::istream& is, SubObjectsFromSprite* subObjects)
+Layer* read_layer(std::istream& is, SubObjectsFromSprite* subObjects, const int docFormatVer)
 {
   ObjectId id = read32(is);
   std::string name = read_string(is);
@@ -111,8 +120,15 @@ Layer* read_layer(std::istream& is, SubObjectsFromSprite* subObjects)
 
   switch (static_cast<ObjectType>(layer_type)) {
 
-    case ObjectType::LayerImage: {
-      LayerImage* imgLayer = new LayerImage(subObjects->sprite());
+    case ObjectType::LayerImage:
+    case ObjectType::LayerTilemap: {
+      LayerImage* imgLayer;
+      if ((static_cast<ObjectType>(layer_type)) == ObjectType::LayerTilemap) {
+        imgLayer = new LayerTilemap(subObjects->sprite(), 0);
+      }
+      else {
+        imgLayer = new LayerImage(subObjects->sprite());
+      }
 
       // Create layer
       layer.reset(imgLayer);
@@ -131,7 +147,7 @@ Layer* read_layer(std::istream& is, SubObjectsFromSprite* subObjects)
       // Read celdatas
       int celdatas = read16(is);
       for (int c=0; c<celdatas; ++c) {
-        CelDataRef celdata(read_celdata(is, subObjects));
+        CelDataRef celdata(read_celdata(is, subObjects, true, docFormatVer));
         subObjects->addCelDataRef(celdata);
       }
 
@@ -143,6 +159,12 @@ Layer* read_layer(std::istream& is, SubObjectsFromSprite* subObjects)
 
         // Add the cel in the layer
         imgLayer->addCel(cel);
+      }
+
+      // Create the layer tilemap
+      if (imgLayer->isTilemap()) {
+        doc::tileset_index tsi = read32(is); // Tileset index
+        static_cast<LayerTilemap*>(imgLayer)->setTilesetIndex(tsi);
       }
       break;
     }
@@ -168,7 +190,7 @@ Layer* read_layer(std::istream& is, SubObjectsFromSprite* subObjects)
 
   }
 
-  UserData userData = read_user_data(is);
+  UserData userData = read_user_data(is, docFormatVer);
 
   if (layer) {
     layer->setName(name);

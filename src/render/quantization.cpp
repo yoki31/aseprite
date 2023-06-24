@@ -1,5 +1,5 @@
 // Aseprite Render Library
-// Copyright (c) 2019-2021  Igara Studio S.A.
+// Copyright (c) 2019-2022  Igara Studio S.A.
 // Copyright (c) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -13,10 +13,10 @@
 
 #include "doc/image_impl.h"
 #include "doc/layer.h"
+#include "doc/octree_map.h"
 #include "doc/palette.h"
 #include "doc/primitives.h"
 #include "doc/remap.h"
-#include "doc/rgbmap.h"
 #include "doc/sprite.h"
 #include "render/dithering.h"
 #include "render/error_diffusion.h"
@@ -42,9 +42,33 @@ Palette* create_palette_from_sprite(
   const bool withAlpha,
   Palette* palette,
   TaskDelegate* delegate,
-  const bool newBlend)
+  const bool newBlend,
+  RgbMapAlgorithm mapAlgo,
+  const bool calculateWithTransparent)
 {
+   if (mapAlgo == doc::RgbMapAlgorithm::DEFAULT)
+     mapAlgo = doc::RgbMapAlgorithm::OCTREE;
+
   PaletteOptimizer optimizer;
+  OctreeMap octreemap;
+
+  // Transparent color is needed if we have transparent layers
+  int maskIndex;
+  if ((sprite->backgroundLayer() && sprite->allLayersCount() == 1) ||
+      !calculateWithTransparent)
+    maskIndex = -1;
+  else if (sprite->colorMode() == ColorMode::INDEXED)
+    maskIndex = sprite->transparentColor();
+  else {
+    ASSERT(sprite->transparentColor() == 0);
+    maskIndex = 0; // For RGB/Grayscale images we use index 0 as the transparent index by default
+  }
+
+  // TODO check if how this is used in OctreeMap, if as a RGBA value
+  //      or as an index (here we are using it as an index).
+  const color_t maskColor = (sprite->backgroundLayer()
+                             && sprite->allLayersCount() == 1) ? DOC_OCTREE_IS_OPAQUE:
+                                                                 sprite->transparentColor();
 
   if (!palette)
     palette = new Palette(fromFrame, 256);
@@ -53,12 +77,24 @@ Palette* create_palette_from_sprite(
   ImageRef flat_image(Image::create(IMAGE_RGB,
       sprite->width(), sprite->height()));
 
-  // Feed the optimizer with all rendered frames
   render::Render render;
   render.setNewBlend(newBlend);
+
+  // Feed the optimizer with all rendered frames
   for (frame_t frame=fromFrame; frame<=toFrame; ++frame) {
     render.renderSprite(flat_image.get(), sprite, frame);
-    optimizer.feedWithImage(flat_image.get(), withAlpha);
+
+    switch (mapAlgo) {
+      case RgbMapAlgorithm::RGB5A3:
+        optimizer.feedWithImage(flat_image.get(), withAlpha);
+        break;
+      case RgbMapAlgorithm::OCTREE:
+        octreemap.feedWithImage(flat_image.get(), withAlpha, maskColor);
+        break;
+      default:
+        ASSERT(false);
+        break;
+    }
 
     if (delegate) {
       if (!delegate->continueTask())
@@ -69,19 +105,36 @@ Palette* create_palette_from_sprite(
     }
   }
 
-  // Transparent color is needed if we have transparent layers
-  int maskIndex;
-  if (sprite->backgroundLayer() && sprite->allLayersCount() == 1)
-    maskIndex = -1;
-  else if (sprite->colorMode() == ColorMode::INDEXED)
-    maskIndex = sprite->transparentColor();
-  else {
-    ASSERT(sprite->transparentColor() == 0);
-    maskIndex = 0; // For RGB/Grayscale images we use index 0 as the transparent index by default
-  }
+  switch (mapAlgo) {
 
-  // Generate an optimized palette
-  optimizer.calculate(palette, maskIndex);
+    case RgbMapAlgorithm::RGB5A3: {
+      // Generate an optimized palette
+      optimizer.calculate(palette, maskIndex);
+      break;
+    }
+
+    case RgbMapAlgorithm::OCTREE:
+      // TODO check calculateWithTransparent flag
+
+      if (!octreemap.makePalette(palette, palette->size())) {
+        // We can use an 8-bit deep octree map, instead of 7-bit of the
+        // first attempt.
+        octreemap = OctreeMap();
+        for (frame_t frame=fromFrame; frame<=toFrame; ++frame) {
+          render.renderSprite(flat_image.get(), sprite, frame);
+          octreemap.feedWithImage(flat_image.get(), withAlpha, maskColor , 8);
+          if (delegate) {
+            if (!delegate->continueTask())
+              return nullptr;
+
+            delegate->notifyTaskProgress(
+              double(frame-fromFrame+1) / double(toFrame-fromFrame+1));
+          }
+        }
+        octreemap.makePalette(palette, palette->size(), 8);
+      }
+      break;
+  }
 
   return palette;
 }
@@ -140,7 +193,7 @@ Image* convert_pixel_format(
 
     case IMAGE_RGB: {
       const LockImageBits<RgbTraits> srcBits(image);
-      LockImageBits<RgbTraits>::const_iterator src_it = srcBits.begin(), src_end = srcBits.end();
+      auto src_it = srcBits.begin(), src_end = srcBits.end();
 
       switch (new_image->pixelFormat()) {
 
@@ -152,12 +205,11 @@ Image* convert_pixel_format(
         // RGB -> Grayscale
         case IMAGE_GRAYSCALE: {
           LockImageBits<GrayscaleTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<GrayscaleTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<GrayscaleTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
           ASSERT(toGray);
 #endif
-
           for (; src_it != src_end; ++src_it, ++dst_it) {
             ASSERT(dst_it != dst_end);
             *dst_it = (*toGray)(*src_it);
@@ -169,9 +221,9 @@ Image* convert_pixel_format(
         // RGB -> Indexed
         case IMAGE_INDEXED: {
           LockImageBits<IndexedTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<IndexedTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<IndexedTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
 #endif
 
           for (; src_it != src_end; ++src_it, ++dst_it) {
@@ -184,9 +236,9 @@ Image* convert_pixel_format(
             a = rgba_geta(c);
 
             if (a == 0)
-              *dst_it = new_mask_color;
+              *dst_it = (new_mask_color == -1? 0 : new_mask_color);
             else if (rgbmap)
-              *dst_it = rgbmap->mapColor(r, g, b, a);
+              *dst_it = rgbmap->mapColor(c);
             else
               *dst_it = palette->findBestfit(r, g, b, a, new_mask_color);
           }
@@ -199,18 +251,17 @@ Image* convert_pixel_format(
 
     case IMAGE_GRAYSCALE: {
       const LockImageBits<GrayscaleTraits> srcBits(image);
-      LockImageBits<GrayscaleTraits>::const_iterator src_it = srcBits.begin(), src_end = srcBits.end();
+      auto src_it = srcBits.begin(), src_end = srcBits.end();
 
       switch (new_image->pixelFormat()) {
 
         // Grayscale -> RGB
         case IMAGE_RGB: {
           LockImageBits<RgbTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<RgbTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<RgbTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
 #endif
-
           for (; src_it != src_end; ++src_it, ++dst_it) {
             ASSERT(dst_it != dst_end);
             c = *src_it;
@@ -231,11 +282,10 @@ Image* convert_pixel_format(
         // Grayscale -> Indexed
         case IMAGE_INDEXED: {
           LockImageBits<IndexedTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<IndexedTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<IndexedTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
 #endif
-
           for (; src_it != src_end; ++src_it, ++dst_it) {
             ASSERT(dst_it != dst_end);
             c = *src_it;
@@ -243,7 +293,7 @@ Image* convert_pixel_format(
             c = graya_getv(c);
 
             if (a == 0)
-              *dst_it = new_mask_color;
+              *dst_it = (new_mask_color == -1? 0 : new_mask_color);
             else if (rgbmap)
               *dst_it = rgbmap->mapColor(c, c, c, a);
             else
@@ -258,26 +308,30 @@ Image* convert_pixel_format(
 
     case IMAGE_INDEXED: {
       const LockImageBits<IndexedTraits> srcBits(image);
-      LockImageBits<IndexedTraits>::const_iterator src_it = srcBits.begin(), src_end = srcBits.end();
+      auto src_it = srcBits.begin(), src_end = srcBits.end();
 
       switch (new_image->pixelFormat()) {
 
         // Indexed -> RGB
         case IMAGE_RGB: {
           LockImageBits<RgbTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<RgbTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<RgbTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
 #endif
-
           for (; src_it != src_end; ++src_it, ++dst_it) {
             ASSERT(dst_it != dst_end);
             c = *src_it;
 
             if (!is_background && c == image->maskColor())
               *dst_it = rgba(0, 0, 0, 0);
-            else
-              *dst_it = palette->getEntry(c);
+            else {
+              const uint32_t p = palette->getEntry(c);
+              if (is_background)
+                *dst_it = rgba(rgba_getr(p), rgba_getg(p), rgba_getb(p), 255);
+              else
+                *dst_it = p;
+            }
           }
           ASSERT(dst_it == dst_end);
           break;
@@ -286,12 +340,11 @@ Image* convert_pixel_format(
         // Indexed -> Grayscale
         case IMAGE_GRAYSCALE: {
           LockImageBits<GrayscaleTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<GrayscaleTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<GrayscaleTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
           ASSERT(toGray);
 #endif
-
           for (; src_it != src_end; ++src_it, ++dst_it) {
             ASSERT(dst_it != dst_end);
             c = *src_it;
@@ -310,11 +363,10 @@ Image* convert_pixel_format(
         // Indexed -> Indexed
         case IMAGE_INDEXED: {
           LockImageBits<IndexedTraits> dstBits(new_image, Image::WriteLock);
-          LockImageBits<IndexedTraits>::iterator dst_it = dstBits.begin();
+          auto dst_it = dstBits.begin();
 #ifdef _DEBUG
-          LockImageBits<IndexedTraits>::iterator dst_end = dstBits.end();
+          auto dst_end = dstBits.end();
 #endif
-
           for (; src_it != src_end; ++src_it, ++dst_it) {
             ASSERT(dst_it != dst_end);
             c = *src_it;
@@ -350,7 +402,15 @@ Image* convert_pixel_format(
 // Creation of optimized palette for RGB images
 // by David Capello
 
-void PaletteOptimizer::feedWithImage(Image* image, bool withAlpha)
+void PaletteOptimizer::feedWithImage(const Image* image,
+                                     const bool withAlpha)
+{
+  feedWithImage(image, image->bounds(), withAlpha);
+}
+
+void PaletteOptimizer::feedWithImage(const Image* image,
+                                     const gfx::Rect& bounds,
+                                     const bool withAlpha)
 {
   uint32_t color;
 
@@ -362,8 +422,8 @@ void PaletteOptimizer::feedWithImage(Image* image, bool withAlpha)
 
     case IMAGE_RGB:
       {
-        const LockImageBits<RgbTraits> bits(image);
-        LockImageBits<RgbTraits>::const_iterator it = bits.begin(), end = bits.end();
+        const LockImageBits<RgbTraits> bits(image, bounds);
+        auto it = bits.begin(), end = bits.end();
 
         for (; it != end; ++it) {
           color = *it;
@@ -379,8 +439,8 @@ void PaletteOptimizer::feedWithImage(Image* image, bool withAlpha)
 
     case IMAGE_GRAYSCALE:
       {
-        const LockImageBits<RgbTraits> bits(image);
-        LockImageBits<RgbTraits>::const_iterator it = bits.begin(), end = bits.end();
+        const LockImageBits<GrayscaleTraits> bits(image, bounds);
+        auto it = bits.begin(), end = bits.end();
 
         for (; it != end; ++it) {
           color = *it;

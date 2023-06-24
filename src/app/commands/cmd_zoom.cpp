@@ -1,4 +1,5 @@
 // Aseprite
+// Copyright (C) 2021-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -12,7 +13,6 @@
 #include "app/commands/command.h"
 #include "app/commands/params.h"
 #include "app/i18n/strings.h"
-#include "app/modules/editors.h"
 #include "app/pref/preferences.h"
 #include "app/ui/editor/editor.h"
 #include "base/convert_to.h"
@@ -73,17 +73,17 @@ void ZoomCommand::onLoadParams(const Params& params)
 
 bool ZoomCommand::onEnabled(Context* context)
 {
-  return (current_editor != NULL);
+  return (Editor::activeEditor() != nullptr);
 }
 
 void ZoomCommand::onExecute(Context* context)
 {
   // Use the current editor by default.
-  Editor* editor = current_editor;
+  auto editor = Editor::activeEditor();
   gfx::Point mousePos = ui::get_mouse_position();
 
   // Try to use the editor above the mouse.
-  ui::Widget* pick = ui::Manager::getDefault()->pick(mousePos);
+  ui::Widget* pick = ui::Manager::getDefault()->pickFromScreenPos(mousePos);
   if (pick && pick->type() == Editor::Type())
     editor = static_cast<Editor*>(pick);
 
@@ -112,7 +112,8 @@ void ZoomCommand::onExecute(Context* context)
   }
 
   editor->setZoomAndCenterInMouse(
-    zoom, mousePos,
+    zoom,
+    editor->display()->nativeWindow()->pointFromScreen(mousePos),
     (focus == Focus::Center ? Editor::ZoomBehavior::CENTER:
                               Editor::ZoomBehavior::MOUSE));
 }

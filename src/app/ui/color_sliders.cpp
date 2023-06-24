@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -14,6 +14,7 @@
 #include "app/color_utils.h"
 #include "app/modules/gfx.h"
 #include "app/ui/color_sliders.h"
+#include "app/ui/expr_entry.h"
 #include "app/ui/skin/skin_slider_property.h"
 #include "app/ui/skin/skin_theme.h"
 #include "base/scoped_value.h"
@@ -128,13 +129,14 @@ namespace {
     app::Color m_color;
   };
 
-  class ColorEntry : public Entry {
+  class ColorEntry : public ExprEntry {
   public:
     ColorEntry(Slider* absSlider, Slider* relSlider)
-      : Entry(4, "0")
+      : ExprEntry()
       , m_absSlider(absSlider)
       , m_relSlider(relSlider)
       , m_recent_focus(false) {
+      setText("0");
     }
 
   private:
@@ -185,7 +187,7 @@ namespace {
                 else
                   ++value;
 
-                setTextf("%d", base::clamp(value, minValue(), maxValue()));
+                setTextf("%d", std::clamp(value, minValue(), maxValue()));
                 selectAllText();
 
                 onChange();
@@ -241,7 +243,6 @@ ColorSliders::ColorSliders()
   , m_color(app::Color::fromMask())
 {
   addChild(&m_grid);
-  m_grid.setChildSpacing(0);
 
   // Same order as in Channel enum
   static_assert(Channel::Red == (Channel)0, "");
@@ -257,6 +258,12 @@ ColorSliders::ColorSliders()
   addSlider(Channel::HslLightness,  "L", 0, 100, -100, 100);
   addSlider(Channel::Gray,          "V", 0, 255, -100, 100);
   addSlider(Channel::Alpha,         "A", 0, 255, -100, 100);
+
+  InitTheme.connect(
+    [this] {
+      m_grid.setChildSpacing(0);
+    }
+  );
 
   m_appConn = App::instance()
     ->ColorSpaceChange.connect([this]{ invalidate(); });
@@ -360,6 +367,8 @@ void ColorSliders::addSlider(const Channel channel,
                              const int absMin, const int absMax,
                              const int relMin, const int relMax)
 {
+  auto theme = skin::SkinTheme::get(this);
+
   Item& item = m_items[channel];
   ASSERT(!item.label);
   item.label     = new Label(labelText);
@@ -387,7 +396,7 @@ void ColorSliders::addSlider(const Channel channel,
   item.relSlider->setVisible(false);
 
   gfx::Size sz(std::numeric_limits<int>::max(),
-               SkinTheme::instance()->dimensions.colorSliderHeight());
+               theme->dimensions.colorSliderHeight());
   item.label->setMaxSize(sz);
   item.box->setMaxSize(sz);
   item.entry->setMaxSize(sz);
@@ -443,7 +452,7 @@ void ColorSliders::syncRelHsvHslSliders()
 
 void ColorSliders::onSliderChange(const Channel i)
 {
-  base::ScopedValue<int> lock(m_lockSlider, i, m_lockSlider);
+  base::ScopedValue<int> lock(m_lockSlider, i);
 
   updateEntryText(i);
   onControlChange(i);
@@ -451,7 +460,7 @@ void ColorSliders::onSliderChange(const Channel i)
 
 void ColorSliders::onEntryChange(const Channel i)
 {
-  base::ScopedValue<int> lock(m_lockEntry, i, m_lockEntry);
+  base::ScopedValue<int> lock(m_lockEntry, i);
 
   // Update the slider related to the changed entry widget.
   int value = m_items[i].entry->textInt();
@@ -459,7 +468,7 @@ void ColorSliders::onEntryChange(const Channel i)
   Slider* slider = (m_mode == Mode::Absolute ?
                     m_items[i].absSlider:
                     m_items[i].relSlider);
-  value = base::clamp(value, slider->getMinValue(), slider->getMaxValue());
+  value = std::clamp(value, slider->getMinValue(), slider->getMaxValue());
   slider->setValue(value);
 
   onControlChange(i);

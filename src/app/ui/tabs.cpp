@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -11,11 +11,11 @@
 
 #include "app/ui/tabs.h"
 
+#include "app/color_utils.h"
 #include "app/modules/gfx.h"
 #include "app/modules/gui.h"
 #include "app/ui/editor/editor_view.h"
 #include "app/ui/skin/skin_theme.h"
-#include "base/clamp.h"
 #include "os/font.h"
 #include "os/surface.h"
 #include "os/system.h"
@@ -148,7 +148,7 @@ void Tabs::removeTab(TabView* tabView, bool with_animation)
 
 void Tabs::updateTabs()
 {
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   double availWidth = bounds().w - m_border*ui::guiscale();
   double defTabWidth = theme->dimensions.tabsWidth();
   double tabWidth = defTabWidth;
@@ -174,6 +174,7 @@ void Tabs::updateTabs()
 
     tab->text = tab->view->getTabText();
     tab->icon = tab->view->getTabIcon();
+    tab->color = tab->view->getTabColor();
     tab->x = int(x);
     tab->width = int(x+tabWidth) - int(x);
     x += tabWidth;
@@ -253,13 +254,15 @@ void Tabs::setDockedStyle()
   initTheme();
 }
 
-void Tabs::setDropViewPreview(const gfx::Point& pos, TabView* view)
+void Tabs::setDropViewPreview(const gfx::Point& screenPos,
+                              TabView* view)
 {
+  int x0 = (display()->nativeWindow()->pointFromScreen(screenPos).x - bounds().x);
   int newIndex = -1;
 
   if (!m_list.empty()) {
-    newIndex = (pos.x - bounds().x) / m_list[0]->width;
-    newIndex = base::clamp(newIndex, 0, (int)m_list.size());
+    newIndex = x0 / m_list[0]->width;
+    newIndex = std::clamp(newIndex, 0, (int)m_list.size());
   }
   else
     newIndex = 0;
@@ -268,7 +271,7 @@ void Tabs::setDropViewPreview(const gfx::Point& pos, TabView* view)
                    m_dropNewTab != view);
 
   m_dropNewIndex = newIndex;
-  m_dropNewPosX = (pos.x - bounds().x);
+  m_dropNewPosX = x0;
   m_dropNewTab = view;
 
   if (startAni)
@@ -298,8 +301,9 @@ bool Tabs::onProcessMessage(Message* msg)
 
       if (hasCapture() && m_selected) {
         MouseMessage* mouseMsg = static_cast<MouseMessage*>(msg);
-        gfx::Point mousePos = mouseMsg->position();
-        gfx::Point delta = mousePos - m_dragMousePos;
+        const gfx::Point mousePos = mouseMsg->position();
+        const gfx::Point screenPos = mouseMsg->screenPosition();
+        const gfx::Point delta = mousePos - m_dragMousePos;
 
         if (!m_isDragging) {
           if (!m_clickedCloseButton && mouseMsg->left()) {
@@ -324,7 +328,8 @@ bool Tabs::onProcessMessage(Message* msg)
             }
 
             if (m_delegate)
-              result = m_delegate->onFloatingTab(this, m_selected->view, mousePos);
+              result = m_delegate->onFloatingTab(
+                this, m_selected->view, screenPos);
 
             if (result != DropViewPreviewResult::DROP_IN_TABS) {
               if (!m_floatingOverlay)
@@ -412,7 +417,7 @@ bool Tabs::onProcessMessage(Message* msg)
             ASSERT(m_selected);
             result = m_delegate->onDropTab(
               this, m_selected->view,
-              mouseMsg->position(), m_dragCopy);
+              mouseMsg->screenPosition(), m_dragCopy);
           }
 
           stopDrag(result);
@@ -430,7 +435,7 @@ bool Tabs::onProcessMessage(Message* msg)
         if (it != m_list.end()) {
           int index = (it - m_list.begin());
           int newIndex = index + dz;
-          newIndex = base::clamp(newIndex, 0, int(m_list.size())-1);
+          newIndex = std::clamp(newIndex, 0, int(m_list.size())-1);
           if (newIndex != index) {
             selectTabInternal(m_list[newIndex]);
           }
@@ -463,7 +468,7 @@ bool Tabs::onProcessMessage(Message* msg)
 void Tabs::onInitTheme(ui::InitThemeEvent& ev)
 {
   Widget::onInitTheme(ev);
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
 
   if (m_docked) {
     m_tabsHeight = theme->dimensions.dockedTabsHeight();
@@ -479,7 +484,7 @@ void Tabs::onInitTheme(ui::InitThemeEvent& ev)
 
 void Tabs::onPaint(PaintEvent& ev)
 {
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   Graphics* g = ev.graphics();
   gfx::Rect rect = clientBounds();
   gfx::Rect box(rect.x, rect.y, rect.w,
@@ -578,7 +583,7 @@ void Tabs::drawTab(Graphics* g, const gfx::Rect& _box,
   if (box.w < ui::guiscale()*8)
     box.w = ui::guiscale()*8;
 
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   int clipTextRightSide;
 
   gfx::Rect closeBox = getTabCloseButtonBounds(tab, box);
@@ -598,6 +603,16 @@ void Tabs::drawTab(Graphics* g, const gfx::Rect& _box,
     g, theme->styles.tab(),
     gfx::Rect(box.x, box.y+dy, box.w, box.h),
     info);
+
+  gfx::Color tabColor = tab->color;
+  gfx::Color textColor = gfx::ColorNone;
+  if (tabColor != gfx::ColorNone) {
+    textColor = color_utils::blackandwhite_neg(tabColor);
+    if (!selected) {
+      tabColor = gfx::seta(tabColor, gfx::geta(tabColor)*3/4);
+      textColor = gfx::seta(textColor, gfx::geta(textColor)*3/4);
+    }
+  }
 
   {
     IntersectClip clip(g, gfx::Rect(box.x, box.y+dy, box.w-clipTextRightSide, box.h));
@@ -625,9 +640,27 @@ void Tabs::drawTab(Graphics* g, const gfx::Rect& _box,
 
     // Tab with text + clipping the close button
     if (box.w > 8*ui::guiscale()) {
+      Style* stylePtr = theme->styles.tabText();
+      Style newStyle(nullptr);
+
       info.text = &tab->text;
+      if (tabColor != gfx::ColorNone) {
+        // TODO replace these fillRect() with a new theme part (which
+        // should be painted with the specific user-defined color)
+        g->fillRect(tabColor, gfx::Rect(box.x+dx+2, box.y+dy+3, box.w-dx-2, box.h-3));
+        g->fillRect(tabColor, gfx::Rect(box.x+dx+3, box.y+dy+2, box.w-dx-3, 1));
+
+        newStyle = Style(*stylePtr);
+        for (auto& layer : newStyle.layers()) {
+          if (layer.type() == ui::Style::Layer::Type::kText ||
+              layer.type() == ui::Style::Layer::Type::kBackground) {
+            layer.setColor(textColor);
+          }
+        }
+        stylePtr = &newStyle;
+      }
       theme->paintWidgetPart(
-        g, theme->styles.tabText(),
+        g, stylePtr,
         gfx::Rect(box.x+dx, box.y+dy, box.w-dx, box.h),
         info);
       info.text = nullptr;
@@ -656,6 +689,11 @@ void Tabs::drawTab(Graphics* g, const gfx::Rect& _box,
       }
     }
 
+    if (tabColor != gfx::ColorNone) {
+      g->fillRect(tabColor, gfx::Rect(closeBox.x, closeBox.y+3, closeBox.w-3, closeBox.h-3));
+      g->fillRect(tabColor, gfx::Rect(closeBox.x, closeBox.y+2, closeBox.w-4, 1));
+    }
+
     info.styleFlags = 0;
     if (selected)
       info.styleFlags |= ui::Style::Layer::kFocus;
@@ -671,7 +709,7 @@ void Tabs::drawTab(Graphics* g, const gfx::Rect& _box,
 
 void Tabs::drawFiller(ui::Graphics* g, const gfx::Rect& box)
 {
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   gfx::Rect rect = clientBounds();
 
   theme->paintWidgetPart(
@@ -718,7 +756,7 @@ void Tabs::calculateHot()
 
   gfx::Rect rect = bounds();
   gfx::Rect box(rect.x+m_border*guiscale(), rect.y, 0, rect.h-1);
-  gfx::Point mousePos = ui::get_mouse_position();
+  gfx::Point mousePos = mousePosInDisplay();
   TabPtr hot(nullptr);
   bool hotCloseButton = false;
 
@@ -752,7 +790,7 @@ void Tabs::calculateHot()
 
 gfx::Rect Tabs::getTabCloseButtonBounds(Tab* tab, const gfx::Rect& box)
 {
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   int iconW = theme->dimensions.tabsCloseIconWidth();
   int iconH = theme->dimensions.tabsCloseIconHeight();
 
@@ -931,6 +969,7 @@ void Tabs::createFloatingOverlay(Tab* tab)
 {
   ASSERT(!m_floatingOverlay);
 
+  ui::Display* display = this->display();
   os::SurfaceRef surface = os::instance()->makeRgbaSurface(
     tab->width, m_tabsHeight);
 
@@ -943,7 +982,7 @@ void Tabs::createFloatingOverlay(Tab* tab)
     surface->drawRect(gfx::Rect(0, 0, surface->width(), surface->height()), paint);
   }
   {
-    Graphics g(surface, 0, 0);
+    Graphics g(display, surface, 0, 0);
     g.setFont(AddRef(font()));
     drawTab(&g, g.getClipBounds(), tab, 0, true, true);
   }
@@ -951,7 +990,7 @@ void Tabs::createFloatingOverlay(Tab* tab)
   surface->setImmutable();
 
   m_floatingOverlay = base::make_ref<ui::Overlay>(
-    surface, gfx::Point(),
+    display, surface, gfx::Point(),
     (ui::Overlay::ZOrder)(Overlay::MouseZOrder-1));
   OverlayManager::instance()->addOverlay(m_floatingOverlay);
 }
@@ -997,14 +1036,14 @@ void Tabs::updateDragTabIndexes(int mouseX, bool startAni)
     int i = (mouseX - m_border*guiscale() - bounds().x) / m_dragTab->width;
 
     if (m_dragCopy) {
-      i = base::clamp(i, 0, int(m_list.size()));
+      i = std::clamp(i, 0, int(m_list.size()));
       if (i != m_dragCopyIndex) {
         m_dragCopyIndex = i;
         startAni = true;
       }
     }
     else if (hasMouseOver()) {
-      i = base::clamp(i, 0, int(m_list.size())-1);
+      i = std::clamp(i, 0, int(m_list.size())-1);
       if (i != m_dragTabIndex) {
         m_list.erase(m_list.begin()+m_dragTabIndex);
         m_list.insert(m_list.begin()+i, m_selected);
@@ -1031,7 +1070,7 @@ void Tabs::updateDragCopyCursor(ui::Message* msg)
                 (tab && m_delegate && m_delegate->canCloneTab(this, tab->view)));
 
   if (oldDragCopy != m_dragCopy) {
-    updateDragTabIndexes(get_mouse_position().x, true);
+    updateDragTabIndexes(mousePosInDisplay().x, true);
     updateMouseCursor();
   }
 }

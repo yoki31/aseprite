@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -14,7 +14,6 @@
 #include "app/file/format_options.h"
 #include "app/transformation.h"
 #include "base/disable_copying.h"
-#include "base/mutex.h"
 #include "base/rw_lock.h"
 #include "doc/blend_mode.h"
 #include "doc/color.h"
@@ -35,6 +34,7 @@ namespace doc {
   class Layer;
   class Mask;
   class Sprite;
+  class Tileset;
 }
 
 namespace gfx {
@@ -64,6 +64,7 @@ namespace app {
       kMaskVisible      = 2, // The mask wasn't hidden by the user
       kInhibitBackup    = 4, // Inhibit the backup process
       kFullyBackedUp    = 8, // Full backup was done
+      kReadOnly         = 16,// This document is read-only
     };
   public:
     Doc(Sprite* sprite);
@@ -96,6 +97,8 @@ namespace app {
     const DocUndo* undoHistory() const { return m_undo.get(); }
     DocUndo* undoHistory() { return m_undo.get(); }
 
+    bool isUndoing() const;
+
     color_t bgColor() const;
     color_t bgColor(Layer* layer) const;
 
@@ -114,6 +117,8 @@ namespace app {
     void notifyCelCopied(Layer* fromLayer, frame_t fromFrame, Layer* toLayer, frame_t toFrame);
     void notifySelectionChanged();
     void notifySelectionBoundariesChanged();
+    void notifyTilesetChanged(Tileset* tileset);
+    void notifyLayerGroupCollapseChange(Layer* layer);
 
     //////////////////////////////////////////////////////////////////////
     // File related properties
@@ -141,6 +146,17 @@ namespace app {
 
     void markAsBackedUp();
     bool isFullyBackedUp() const;
+
+    // TODO This read-only flag might be confusing because it
+    //      indicates that the file was loaded from an incompatible
+    //      version (future unknown feature) and it's preferable to
+    //      mark the sprite as read-only to avoid overwriting unknown
+    //      data. If in the future we want to add the possibility to
+    //      mark a regular file as read-only, this flag'll need a new
+    //      name.
+    void markAsReadOnly();
+    bool isReadOnly() const;
+    void removeReadOnlyMark();
 
     //////////////////////////////////////////////////////////////////////
     // Loaded options from file

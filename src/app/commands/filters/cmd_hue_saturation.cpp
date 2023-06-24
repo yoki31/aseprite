@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2017-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -80,6 +80,7 @@ public:
     m_sliders.setMode(ColorSliders::Mode::Relative);
     m_sliders.ColorChange.connect([this]{ onChangeControls(); });
 
+    initTheme();
     onChangeMode();
   }
 
@@ -95,6 +96,8 @@ private:
   }
 
   void onChangeMode() {
+    stopPreview();
+
     Preferences::instance().hueSaturation.mode(mode());
     m_filter.setMode(mode());
     m_sliders.setColorType(isHsl() ?
@@ -105,6 +108,8 @@ private:
   }
 
   void onChangeControls() {
+    stopPreview();
+
     m_sliders.syncRelHsvHslSliders();
 
     if (isHsl()) {

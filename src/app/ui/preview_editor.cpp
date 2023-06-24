@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -16,13 +16,12 @@
 #include "app/doc_event.h"
 #include "app/ini_file.h"
 #include "app/loop_tag.h"
-#include "app/modules/editors.h"
+#include "app/i18n/strings.h"
 #include "app/modules/gui.h"
 #include "app/pref/preferences.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/editor/editor_customization_delegate.h"
 #include "app/ui/editor/editor_view.h"
-#include "app/ui/editor/navigate_state.h"
 #include "app/ui/editor/play_state.h"
 #include "app/ui/skin/skin_theme.h"
 #include "app/ui/status_bar.h"
@@ -33,6 +32,7 @@
 #include "ui/base.h"
 #include "ui/button.h"
 #include "ui/close_event.h"
+#include "ui/fit_bounds.h"
 #include "ui/message.h"
 #include "ui/system.h"
 
@@ -54,11 +54,13 @@ public:
 protected:
   void onInitTheme(ui::InitThemeEvent& ev) override {
     CheckBox::onInitTheme(ev);
-    setStyle(SkinTheme::instance()->styles.windowCenterButton());
+
+    auto theme = SkinTheme::get(this);
+    setStyle(theme->styles.windowCenterButton());
   }
 
   void onSetDecorativeWidgetBounds() override {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     Widget* window = parent();
     gfx::Rect rect(0, 0, 0, 0);
     gfx::Size centerSize = this->sizeHint();
@@ -112,15 +114,15 @@ private:
     setupIcons();
   }
 
-  void onClick(Event& ev) override {
+  void onClick() override {
     m_isPlaying = !m_isPlaying;
     setupIcons();
 
-    Button::onClick(ev);
+    Button::onClick();
   }
 
   void onSetDecorativeWidgetBounds() override {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     Widget* window = parent();
     gfx::Rect rect(0, 0, 0, 0);
     gfx::Size playSize = this->sizeHint();
@@ -163,7 +165,7 @@ private:
   }
 
   void setupIcons() {
-    SkinTheme* theme = SkinTheme::instance();
+    auto theme = SkinTheme::get(this);
     if (m_isPlaying)
       setStyle(theme->styles.windowStopButton());
     else
@@ -174,13 +176,14 @@ private:
 };
 
 PreviewEditorWindow::PreviewEditorWindow()
-  : Window(WithTitleBar, "Preview")
+  : Window(WithTitleBar, Strings::preview_title())
   , m_docView(NULL)
   , m_centerButton(new MiniCenterButton())
   , m_playButton(new MiniPlayButton())
   , m_refFrame(0)
   , m_aniSpeed(1.0)
   , m_relatedEditor(nullptr)
+  , m_opening(false)
 {
   setAutoRemap(false);
   setWantFocus(false);
@@ -206,7 +209,7 @@ void PreviewEditorWindow::setPreviewEnabled(bool state)
 {
   m_isEnabled = state;
 
-  updateUsingEditor(current_editor);
+  updateUsingEditor(Editor::activeEditor());
 }
 
 void PreviewEditorWindow::pressPlayButton()
@@ -219,24 +222,27 @@ bool PreviewEditorWindow::onProcessMessage(ui::Message* msg)
 {
   switch (msg->type()) {
 
-    case kOpenMessage:
-      {
-        SkinTheme* theme = SkinTheme::instance();
+    case kOpenMessage: {
+      Manager* manager = this->manager();
+      Display* mainDisplay = manager->display();
 
-        // Default bounds
-        int width = ui::display_w()/4;
-        int height = ui::display_h()/4;
-        int extra = 2*theme->dimensions.miniScrollbarSize();
-        setBounds(
-          gfx::Rect(
-            ui::display_w() - width - ToolBar::instance()->bounds().w - extra,
-            ui::display_h() - height - StatusBar::instance()->bounds().h - extra,
-            width, height));
+      gfx::Rect defaultBounds(mainDisplay->size() / 4);
+      auto theme = SkinTheme::get(this);
+      gfx::Rect mainWindow = manager->bounds();
 
-        load_window_pos(this, "MiniEditor", false);
-        invalidate();
+      int extra = theme->dimensions.miniScrollbarSize();
+      if (get_multiple_displays()) {
+        extra *= mainDisplay->scale();
       }
+      defaultBounds.x = mainWindow.x2() - ToolBar::instance()->sizeHint().w - defaultBounds.w - extra;
+      defaultBounds.y = mainWindow.y2() - StatusBar::instance()->sizeHint().h - defaultBounds.h - extra;
+
+      fit_bounds(mainDisplay, this, defaultBounds);
+
+      load_window_pos(this, "MiniEditor", false);
+      invalidate();
       break;
+    }
 
     case kCloseMessage:
       save_window_pos(this, "MiniEditor");
@@ -311,7 +317,8 @@ void PreviewEditorWindow::onPlayClicked()
   if (m_playButton->isPlaying()) {
     m_refFrame = miniEditor->frame();
     miniEditor->play(Preferences::instance().preview.playOnce(),
-                     Preferences::instance().preview.playAll());
+                     Preferences::instance().preview.playAll(),
+                     Preferences::instance().preview.playSubtags());
   }
   else {
     miniEditor->stop();
@@ -326,12 +333,7 @@ void PreviewEditorWindow::onPopupSpeed()
   if (!miniEditor || !miniEditor->document())
     return;
 
-  auto& pref = Preferences::instance();
-
-  miniEditor->showAnimationSpeedMultiplierPopup(
-    pref.preview.playOnce,
-    pref.preview.playAll,
-    false);
+  miniEditor->showAnimationSpeedMultiplierPopup();
   m_aniSpeed = miniEditor->getAnimationSpeedMultiplier();
 }
 
@@ -342,6 +344,9 @@ Editor* PreviewEditorWindow::previewEditor() const
 
 void PreviewEditorWindow::updateUsingEditor(Editor* editor)
 {
+  if (m_opening)
+    return;
+
   if (!m_isEnabled || !editor) {
     hideWindow();
     m_relatedEditor = nullptr;
@@ -356,8 +361,11 @@ void PreviewEditorWindow::updateUsingEditor(Editor* editor)
   Doc* document = editor->document();
   Editor* miniEditor = (m_docView ? m_docView->editor(): nullptr);
 
-  if (!isVisible())
+  if (!isVisible()) {
+    m_opening = true;
     openWindow();
+    m_opening = false;
+  }
 
   // Document preferences used to store the preferred zoom/scroll point
   auto& docPref = Preferences::instance().document(document);
@@ -374,7 +382,6 @@ void PreviewEditorWindow::updateUsingEditor(Editor* editor)
     miniEditor->setZoom(render::Zoom::fromScale(docPref.preview.zoom()));
     miniEditor->setLayer(editor->layer());
     miniEditor->setFrame(editor->frame());
-    miniEditor->setState(EditorStatePtr(new NavigateState));
     miniEditor->setAnimationSpeedMultiplier(m_aniSpeed);
     miniEditor->add_observer(this);
     layout();
@@ -508,7 +515,8 @@ void PreviewEditorWindow::adjustPlayingTag()
     miniEditor->setFrame(m_refFrame = editor->frame());
 
   miniEditor->play(Preferences::instance().preview.playOnce(),
-                   Preferences::instance().preview.playAll());
+                   Preferences::instance().preview.playAll(),
+                   Preferences::instance().preview.playSubtags());
 }
 
 } // namespace app

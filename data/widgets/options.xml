@@ -1,5 +1,5 @@
 <!-- Aseprite -->
-<!-- Copyright (C) 2018-2021  Igara Studio S.A. -->
+<!-- Copyright (C) 2018-2023  Igara Studio S.A. -->
 <!-- Copyright (C) 2001-2018  David Capello -->
 <gui>
   <window id="options" text="@.title">
@@ -32,6 +32,18 @@
         <vbox id="section_general">
           <separator text="@.section_general" horizontal="true" />
           <grid columns="3">
+            <label text="@.ui_windows" />
+            <hbox>
+              <buttonset columns="2" id="ui_windows">
+                <item icon="one_win_icon" tooltip="@.one_win" tooltip_dir="bottom" style="multi_window_item" />
+                <item icon="multi_win_icon" tooltip="@.multi_win" tooltip_dir="bottom" style="multi_window_item" />
+              </buttonset>
+              <hbox id="theme_variants">
+                <label text="@.theme_mode" />
+              </hbox>
+            </hbox>
+            <boxfiller />
+
             <label text="@.screen_scaling" />
             <combobox id="screen_scale">
               <listitem text="100%" value="1" />
@@ -39,7 +51,7 @@
               <listitem text="300%" value="3" />
               <listitem text="400%" value="4" />
             </combobox>
-	    <boxfiller />
+            <boxfiller />
 
             <label text="@.ui_scaling" />
             <combobox id="ui_scale">
@@ -63,7 +75,7 @@
 		 text="@.show_home" />
           <check id="expand_menubar_on_mouseover"
                  text="@.expand_menu_bar_items_on_mouseover"
-                 tooltip="@.expand_menu_bar_items_on_mouseover" />
+                 tooltip="@.expand_menu_bar_items_on_mouseover_tooltip" />
           <check id="color_bar_entries_separator"
                  text="@.color_bar_entries_separator"
                  tooltip="@.color_bar_entries_separator"
@@ -230,6 +242,7 @@
                  pref="editor.auto_fit" />
           <check text="@.straight_line_preview" id="straight_line_preview" tooltip="@.straight_line_preview_tooltip" />
           <check text="@.discard_brush" id="discard_brush" />
+          <hbox id="sampling_placeholder" />
           <hbox>
             <label text="@.right_click" />
             <combobox id="right_click_behavior" expansive="true" />
@@ -316,20 +329,20 @@
         <vbox id="section_bg">
           <combobox id="bg_scope" />
 
-          <separator text="@.bg_checked" horizontal="true" />
+          <separator text="@.bg_checkered" horizontal="true" />
           <grid columns="2">
             <label text="@.bg_size" />
 	    <hbox>
-              <combobox id="checked_bg_size" />
-              <expr id="checked_bg_custom_w" />
-              <expr id="checked_bg_custom_h" />
-              <check text="@.bg_apply_zoom" id="checked_bg_zoom" />
+              <combobox id="checkered_bg_size" />
+              <expr id="checkered_bg_custom_w" />
+              <expr id="checkered_bg_custom_h" />
+              <check text="@.bg_apply_zoom" id="checkered_bg_zoom" />
 	    </hbox>
 
             <label text="@.bg_colors" />
 	    <hbox>
-              <colorpicker id="checked_bg_color1" rgba="true" />
-              <colorpicker id="checked_bg_color2" rgba="true" />
+              <colorpicker id="checkered_bg_color1" rgba="true" />
+              <colorpicker id="checkered_bg_color2" rgba="true" />
 	    </hbox>
           </grid>
 
@@ -497,8 +510,11 @@
         <!-- Experimental -->
         <vbox id="section_experimental">
           <separator text="@.user_interface" horizontal="true" />
+          <check id="multiple_windows" text="@.multiple_windows"
+                 pref="experimental.multiple_windows" />
           <hbox>
-            <check text="@.new_render_engine"
+            <check id="new_render_engine"
+                   text="@.new_render_engine"
                    pref="experimental.new_render_engine" />
             <link text="(#1671)" url="https://github.com/aseprite/aseprite/issues/1671" />
           </hbox>
@@ -509,7 +525,10 @@
           </hbox>
           <check id="native_clipboard" text="@.native_clipboard" />
           <check id="native_file_dialog" text="@.native_file_dialog" />
-	  <hbox id="load_wintab_driver_box">
+          <check id="tint_shade_tone_hue_with_sat_value"
+                 text="@.hue_with_sat_value"
+                 pref="experimental.hue_with_sat_value_for_color_selector" />
+          <hbox id="load_wintab_driver_box">
             <check id="load_wintab_driver2"
                    text="@.load_wintab_driver"
                    tooltip="@.load_wintab_driver_tooltip" />
@@ -520,6 +539,21 @@
             <label text="@.non_active_layer_opacity" />
             <slider id="nonactive_layers_opacity" min="0" max="255" width="128" />
           </hbox>
+          <separator text="@.color_quantization" horizontal="true" />
+          <hbox>
+            <label text="@rgbmap_algorithm_selector.label" />
+            <hbox id="rgbmap_algorithm_placeholder" />
+          </hbox>
+          <separator text="@.performance" horizontal="true" />
+          <hbox>
+            <check id="shaders_for_color_selectors"
+                   text="@.shaders_for_color_selectors"
+                   pref="experimental.use_shaders_for_color_selectors" />
+            <link text="(#960)" url="https://github.com/aseprite/aseprite/issues/960" />
+          </hbox>
+          <check id="cache_compressed_tilesets"
+                 text="@.cache_compressed_tilesets"
+                 pref="tileset.cache_compressed_tilesets" />
         </vbox>
 
       </panel>

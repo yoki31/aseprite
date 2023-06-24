@@ -1,12 +1,13 @@
 # Aseprite
-# Copyright (C) 2018-2021  Igara Studio S.A.
+# Copyright (C) 2018-2022  Igara Studio S.A.
 # Copyright (C) 2001-2018  David Capello
 
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.16)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF) # We use -std=c++14 instead of -std=gnu++14 in macOS
+set(CMAKE_CXX_EXTENSIONS OFF) # We use -std=c++17 instead of -std=gnu++17 in macOS
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 if(COMMAND cmake_policy)
   # CMP0003: Libraries linked via full path no longer produce linker search paths.
@@ -30,13 +31,6 @@ set(CMAKE_USER_MAKE_RULES_OVERRIDE_CXX ${CMAKE_CURRENT_SOURCE_DIR}/laf/cmake/cxx
 # Aseprite project
 project(aseprite C CXX)
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-  # As we compile with CMAKE_OSX_DEPLOYMENT_TARGET=10.9, we have to
-  # explicitly say that we want to use libc++ instead of the GNU
-  # libstdc++
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
-endif()
-
 # Check repository status
 if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/laf/CMakeLists.txt)
   message(FATAL_ERROR "Your Aseprite repository is incomplete, initialize submodules using:\n  git submodule update --init --recursive")
@@ -51,10 +45,6 @@ enable_testing()
 ######################################################################
 # Options (these can be specified in cmake command line or modifying
 # CMakeCache.txt)
-
-option(WITH_WEBP_SUPPORT            "Enable support to load/save .webp files" on)
-option(WITH_DESKTOP_INTEGRATION     "Enable desktop integration modules" off)
-option(WITH_QT_THUMBNAILER          "Enable kde5/qt5 thumnailer" off)
 
 option(USE_SHARED_CMARK   "Use your installed copy of cmark" off)
 option(USE_SHARED_CURL    "Use your installed copy of curl" off)
@@ -75,6 +65,7 @@ option(ENABLE_WEBSOCKET    "Compile with websocket support" on)
 option(ENABLE_TESTS        "Compile unit tests" off)
 option(ENABLE_BENCHMARKS   "Compile benchmarks" off)
 option(ENABLE_TRIAL_MODE   "Compile the trial version" off)
+option(ENABLE_DRM          "Compile the DRM-enabled version (e.g. for automatic updates)" off)
 option(ENABLE_STEAM        "Compile with Steam library" off)
 option(ENABLE_DEVMODE      "Compile vesion for developers" off)
 option(ENABLE_UI           "Compile UI (turn off to compile CLI-only version)" on)
@@ -82,17 +73,32 @@ option(FULLSCREEN_PLATFORM "Enable fullscreen by default" off)
 option(ENABLE_CLANG_TIDY   "Enable static analysis" off)
 option(ENABLE_CCACHE       "Use CCache to improve recompilation speed (optional)" on)
 option(ENABLE_SENTRY       "Use Sentry SDK to report crashes" off)
+option(ENABLE_WEBP         "Enable support to load/save .webp files" on)
+option(ENABLE_PSD          "Enable experimental support for .psd files" off)
+option(ENABLE_DESKTOP_INTEGRATION  "Enable desktop integration modules" off)
+option(ENABLE_QT_THUMBNAILER       "Enable kde5/qt5 thumnailer" off)
 set(CUSTOM_WEBSITE_URL "" CACHE STRING "Enable custom local webserver to check updates")
 
 if(ENABLE_SENTRY)
   set(SENTRY_DIR "" CACHE STRING "Sentry native location")
-  set(SENTRY_DNS "" CACHE STRING "Sentry DNS URL")
+  set(SENTRY_DSN "" CACHE STRING "Sentry Data Source Name URL")
+  set(SENTRY_ENV "development" CACHE STRING "Sentry environment (production, testing, development, etc.)")
 endif()
 
-if(ENABLE_NEWS OR ENABLE_UPDATER)
+if(ENABLE_NEWS OR ENABLE_UPDATER OR ENABLE_DRM)
   set(REQUIRE_CURL ON)
 else()
   set(REQUIRE_CURL OFF)
+endif()
+
+# Select libcurl's TLS backend according to target platform
+if(REQUIRE_CURL AND ENABLE_DRM)
+  if(APPLE)
+    option(CMAKE_USE_SECTRANSP "enable Apple OS native SSL/TLS" ON)
+  endif()
+  if(WIN32)
+    set(CMAKE_USE_SCHANNEL "enable Windows native SSL/TLS" ON)
+  endif()
 endif()
 
 if(NOT LAF_OS_BACKEND)
@@ -111,6 +117,10 @@ if(LAF_OS_WITH_GTK)
   if(NOT USE_SHARED_HARFBUZZ)
     message(FATAL_ERROR "Cannot compile with gtk and static HarfBuzz, set USE_SHARED_HARFBUZZ=ON")
   endif()
+endif()
+
+if(ENABLE_DRM AND NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/drm/CMakeLists.txt)
+  message(FATAL_ERROR "Your Aseprite repository is incomplete, clone the drm repository")
 endif()
 
 ######################################################################
@@ -234,13 +244,6 @@ endif()
 include_directories(${PNG_INCLUDE_DIRS})
 add_definitions(-DPNG_NO_MMX_CODE) # Do not use MMX optimizations in PNG code
 
-# libwebp
-if(WITH_WEBP_SUPPORT)
-  set(WEBP_LIBRARIES webp webpdemux libwebpmux)
-  set(WEBP_INCLUDE_DIR ${LIBWEBP_DIR}/src)
-  include_directories(${WEBP_INCLUDE_DIR})
-endif()
-
 # tinyxml
 if(USE_SHARED_TINYXML)
   find_library(TINYXML_LIBRARY NAMES tinyxml)
@@ -266,7 +269,7 @@ include_directories(${PIXMAN_INCLUDE_DIR})
 # freetype
 if(USE_SHARED_FREETYPE)
   find_package(Freetype REQUIRED)
-else()
+elseif(NOT LAF_BACKEND STREQUAL "skia")
   set(FREETYPE_FOUND ON)
   set(FREETYPE_LIBRARY freetype)
   set(FREETYPE_LIBRARIES ${FREETYPE_LIBRARY})
@@ -277,11 +280,9 @@ include_directories(${FREETYPE_INCLUDE_DIRS})
 # harfbuzz
 if(USE_SHARED_HARFBUZZ)
   find_package(HarfBuzz)
-else()
-  if(NOT LAF_BACKEND STREQUAL "skia")
-    set(HARFBUZZ_LIBRARIES harfbuzz)
-    set(HARFBUZZ_INCLUDE_DIRS ${HARFBUZZ_DIR}/src)
-  endif()
+elseif(NOT LAF_BACKEND STREQUAL "skia")
+  set(HARFBUZZ_LIBRARIES harfbuzz)
+  set(HARFBUZZ_INCLUDE_DIRS ${HARFBUZZ_DIR}/src)
 endif()
 include_directories(${HARFBUZZ_INCLUDE_DIRS})
 
@@ -318,6 +319,8 @@ if(REQUIRE_CURL)
   if(USE_SHARED_CURL)
     find_package(CURL REQUIRED)
   else()
+    set(CURL_FOUND 1)
+    set(CURL_LIBRARY libcurl)
     set(CURL_LIBRARIES libcurl)
     set(CURL_INCLUDE_DIRS ${CURL_DIR}/include)
   endif()
@@ -330,9 +333,6 @@ include_directories(${SIMPLEINI_DIR})
 # Third parties
 add_subdirectory(third_party)
 
-# LAF libraries + Aseprite are compiled with config.h
-include_directories(src)
-add_definitions(-DHAVE_CONFIG_H)
 if(ENABLE_MEMLEAK)
   add_definitions(-DLAF_MEMLEAK)
 endif()
@@ -340,16 +340,30 @@ endif()
 set(LAF_WITH_TESTS ${ENABLE_TESTS} CACHE BOOL "Enable LAF tests")
 set(UNDO_TESTS     ${ENABLE_TESTS} CACHE BOOL "Enable undo tests")
 
+if(ENABLE_DRM)
+  add_subdirectory(drm)
+endif()
 add_subdirectory(laf)
 
-# Use the Skia harfbuzz (it's a modified version with C++11 mutexes).
-if(LAF_BACKEND STREQUAL "skia")
-  add_definitions(-DHAVE_CONFIG_OVERRIDE_H=1)
-  set(HARFBUZZ_LIBRARIES ${SKIA_HARFBUZZ_LIBRARY})
-  set(HARFBUZZ_INCLUDE_DIRS
-    ${SKIA_DIR}/third_party/harfbuzz
-    ${SKIA_DIR}/third_party/externals/harfbuzz/src)
+# libwebp
+if(ENABLE_WEBP)
+  # Use libwebp from Skia
+  if(LAF_BACKEND STREQUAL "skia")
+    find_library(WEBP_LIBRARIES webp
+      NAMES libwebp # required for Windows
+      PATHS "${SKIA_LIBRARY_DIR}" NO_DEFAULT_PATH)
+    set(WEBP_INCLUDE_DIR "${SKIA_DIR}/third_party/externals/libwebp/src")
+  else()
+    set(WEBP_LIBRARIES webp webpdemux libwebpmux)
+    set(WEBP_INCLUDE_DIR ${LIBWEBP_DIR}/src)
+  endif()
+  include_directories(${WEBP_INCLUDE_DIR})
 endif()
+message(STATUS "aseprite libwebp: ${WEBP_LIBRARIES}")
+
+# LAF libraries + Aseprite are compiled with config.h
+target_include_directories(laf-base PUBLIC src)
+target_compile_definitions(laf-base PUBLIC HAVE_CONFIG_H)
 
 add_subdirectory(src)
 

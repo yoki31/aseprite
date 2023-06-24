@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2018  David Capello
 //
 // This program is distributed under the terms of
@@ -13,9 +13,11 @@
 #include "app/cmd/set_tag_color.h"
 #include "app/cmd/set_tag_name.h"
 #include "app/cmd/set_tag_range.h"
+#include "app/cmd/set_tag_repeat.h"
 #include "app/script/docobj.h"
 #include "app/script/engine.h"
 #include "app/script/luacpp.h"
+#include "app/script/userdata.h"
 #include "app/tx.h"
 #include "doc/sprite.h"
 #include "doc/tag.h"
@@ -29,9 +31,9 @@ namespace {
 
 int Tag_eq(lua_State* L)
 {
-  const auto a = get_docobj<Tag>(L, 1);
-  const auto b = get_docobj<Tag>(L, 2);
-  lua_pushboolean(L, a->id() == b->id());
+  const auto a = may_get_docobj<Tag>(L, 1);
+  const auto b = may_get_docobj<Tag>(L, 2);
+  lua_pushboolean(L, (!a && !b) || (a && b && a->id() == b->id()));
   return 1;
 }
 
@@ -83,17 +85,10 @@ int Tag_get_aniDir(lua_State* L)
   return 1;
 }
 
-int Tag_get_color(lua_State* L)
+int Tag_get_repeats(lua_State* L)
 {
   auto tag = get_docobj<Tag>(L, 1);
-  doc::color_t docColor = tag->color();
-  app::Color appColor = app::Color::fromRgb(doc::rgba_getr(docColor),
-                                            doc::rgba_getg(docColor),
-                                            doc::rgba_getb(docColor),
-                                            doc::rgba_geta(docColor));
-  if (appColor.getAlpha() == 0)
-    appColor = app::Color::fromMask();
-  push_obj<app::Color>(L, appColor);
+  lua_pushinteger(L, (int)tag->repeat());
   return 1;
 }
 
@@ -142,12 +137,12 @@ int Tag_set_aniDir(lua_State* L)
   return 0;
 }
 
-int Tag_set_color(lua_State* L)
+int Tag_set_repeats(lua_State* L)
 {
   auto tag = get_docobj<Tag>(L, 1);
-  doc::color_t docColor = convert_args_into_pixel_color(L, 2, doc::IMAGE_RGB);
+  const int repeat = lua_tointeger(L, 2);
   Tx tx;
-  tx(new cmd::SetTagColor(tag, docColor));
+  tx(new cmd::SetTagRepeat(tag, repeat));
   tx.commit();
   return 0;
 }
@@ -164,7 +159,10 @@ const Property Tag_properties[] = {
   { "frames", Tag_get_frames, nullptr },
   { "name", Tag_get_name, Tag_set_name },
   { "aniDir", Tag_get_aniDir, Tag_set_aniDir },
-  { "color", Tag_get_color, Tag_set_color },
+  { "repeats", Tag_get_repeats, Tag_set_repeats }, // Cannot be "repeat" because it's a Lua keyword
+  { "color", UserData_get_color<Tag>, UserData_set_color<Tag> },
+  { "data", UserData_get_text<Tag>, UserData_set_text<Tag> },
+  { "properties", UserData_get_properties<Tag>, UserData_set_properties<Tag> },
   { nullptr, nullptr, nullptr }
 };
 

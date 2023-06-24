@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -25,6 +25,11 @@ class DraggableWidget : public Base {
 public:
   template<typename...Args>
   DraggableWidget(Args...args) : Base(args...) { }
+
+  ~DraggableWidget() {
+    if (m_floatingOverlay)
+      destroyFloatingOverlay();
+  }
 
   bool onProcessMessage(ui::Message* msg) override {
     switch (msg->type()) {
@@ -147,14 +152,16 @@ private:
       paint.style(os::Paint::Fill);
       surface->drawRect(gfx::Rect(0, 0, surface->width(), surface->height()), paint);
     }
+
+    ui::Display* display = this->Base::display();
     {
-      ui::Graphics g(surface, 0, 0);
+      ui::Graphics g(display, surface, 0, 0);
       g.setFont(AddRef(this->font()));
       drawFloatingOverlay(g);
     }
 
     m_floatingOverlay = base::make_ref<ui::Overlay>(
-      surface, gfx::Point(),
+      display, surface, gfx::Point(),
       (ui::Overlay::ZOrder)(ui::Overlay::MouseZOrder-1));
     ui::OverlayManager::instance()->addOverlay(m_floatingOverlay);
   }

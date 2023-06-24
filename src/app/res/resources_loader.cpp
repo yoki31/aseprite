@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -20,11 +20,11 @@
 
 namespace app {
 
-ResourcesLoader::ResourcesLoader(ResourcesLoaderDelegate* delegate)
-  : m_delegate(delegate)
+ResourcesLoader::ResourcesLoader(std::unique_ptr<ResourcesLoaderDelegate>&& delegate)
+  : m_delegate(std::move(delegate))
   , m_done(false)
   , m_cancel(false)
-  , m_thread(new base::thread([this]{ threadLoadResources(); }))
+  , m_thread(new std::thread([this]{ threadLoadResources(); }))
 {
 }
 
@@ -62,7 +62,7 @@ void ResourcesLoader::reload()
 
 void ResourcesLoader::threadLoadResources()
 {
-  base::ScopedValue<bool> scoped(m_done, false, true);
+  base::ScopedValue scoped(m_done, false, true);
 
   // Load resources from extensions
   std::map<std::string, std::string> idAndPaths;
@@ -83,9 +83,9 @@ void ResourcesLoader::threadLoadResources()
   }
 }
 
-base::thread* ResourcesLoader::createThread()
+std::thread* ResourcesLoader::createThread()
 {
-  return new base::thread([this]{ threadLoadResources(); });
+  return new std::thread([this]{ threadLoadResources(); });
 }
 
 } // namespace app

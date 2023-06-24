@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -14,7 +14,6 @@
 #include "app/modules/gfx.h"
 #include "app/thumbnail_generator.h"
 #include "app/ui/skin/skin_theme.h"
-#include "base/clamp.h"
 #include "base/string.h"
 #include "base/time.h"
 #include "os/font.h"
@@ -159,7 +158,7 @@ void FileList::goUp()
 
 void FileList::setZoom(const double zoom)
 {
-  m_zoom = base::clamp(zoom, 1.0, 8.0);
+  m_zoom = std::clamp(zoom, 1.0, 8.0);
   m_req_valid = false;
 
   // if (auto view = View::getView(this))
@@ -179,6 +178,7 @@ bool FileList::onProcessMessage(Message* msg)
 
     case kMouseDownMessage:
       captureMouse();
+      [[fallthrough]];
 
     case kMouseMoveMessage:
       if (hasCapture()) {
@@ -358,7 +358,7 @@ bool FileList::onProcessMessage(Message* msg)
         }
 
         if (bottom > 0)
-          selectIndex(base::clamp(select, 0, bottom-1));
+          selectIndex(std::clamp(select, 0, bottom-1));
 
         return true;
       }
@@ -423,7 +423,7 @@ bool FileList::onProcessMessage(Message* msg)
 void FileList::onPaint(ui::PaintEvent& ev)
 {
   Graphics* g = ev.graphics();
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   gfx::Rect bounds = clientBounds();
 
   g->fillRect(theme->colors.background(), bounds);
@@ -442,8 +442,17 @@ void FileList::onPaint(ui::PaintEvent& ev)
 
   // Paint main selected index (so if the filename label is bigger it
   // will appear over other items).
-  if (m_selected)
-    paintItem(g, m_selected, selectedIndex);
+  if (m_selected) {
+    ASSERT(selectedIndex >= 0);
+    if (selectedIndex >= 0)
+      paintItem(g, m_selected, selectedIndex);
+    else {
+      // Strange run-time state where the "m_selected" is not in the
+      // list. The previous assert should fail on Debug so this is
+      // here only for Release mode.
+      return;
+    }
+  }
 
   // Draw main thumbnail for the selected item when there are no
   // thumbnails per item.
@@ -456,9 +465,22 @@ void FileList::onPaint(ui::PaintEvent& ev)
     tbounds.shrink(1);
 
     os::SurfaceRef thumbnail = m_selected->getThumbnail();
-    g->drawRgbaSurface(thumbnail.get(),
-                       gfx::Rect(0, 0, thumbnail->width(), thumbnail->height()),
-                       tbounds);
+
+    ui::Paint paint;
+    paint.blendMode(os::BlendMode::SrcOver);
+
+    os::Sampling sampling;
+    if (thumbnail->width() > tbounds.w &&
+        thumbnail->height() > tbounds.h) {
+      sampling = os::Sampling(os::Sampling::Filter::Linear,
+                              os::Sampling::Mipmap::Nearest);
+    }
+
+    g->drawSurface(thumbnail.get(),
+                   gfx::Rect(0, 0, thumbnail->width(), thumbnail->height()),
+                   tbounds,
+                   sampling,
+                   &paint);
   }
 }
 
@@ -468,7 +490,7 @@ void FileList::paintItem(ui::Graphics* g, IFileItem* fi, const int i)
   if ((g->getClipBounds() & info.bounds).isEmpty())
     return;
 
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   const bool evenRow = ((i & 1) == 0);
   gfx::Rect tbounds = info.thumbnail;
 
@@ -552,9 +574,21 @@ void FileList::paintItem(ui::Graphics* g, IFileItem* fi, const int i)
         tbounds.shrink(1);
       }
 
-      g->drawRgbaSurface(thumbnail.get(),
-                         gfx::Rect(0, 0, thumbnail->width(), thumbnail->height()),
-                         tbounds);
+      ui::Paint paint;
+      paint.blendMode(os::BlendMode::SrcOver);
+
+      os::Sampling sampling;
+      if (thumbnail->width() > tbounds.w &&
+          thumbnail->height() > tbounds.h) {
+        sampling = os::Sampling(os::Sampling::Filter::Linear,
+                                os::Sampling::Mipmap::Nearest);
+      }
+
+      g->drawSurface(thumbnail.get(),
+                     gfx::Rect(0, 0, thumbnail->width(), thumbnail->height()),
+                     tbounds,
+                     sampling,
+                     &paint);
     }
     else {
       tbounds = gfx::Rect(0, 0, 20*guiscale(), 2+4*(8.0-m_zoom)/8.0*guiscale())
@@ -586,7 +620,7 @@ gfx::Rect FileList::mainThumbnailBounds()
   gfx::Rect vp = view->viewportBounds();
   int x = vp.x+vp.w - 2*guiscale() - thumbnail->width();
   int y = info.bounds.center().y - thumbnail->height()/2 + bounds().y;
-  y = base::clamp(y, vp.y+2*guiscale(), vp.y+vp.h-3*guiscale()-thumbnail->height());
+  y = std::clamp(y, vp.y+2*guiscale(), vp.y+vp.h-3*guiscale()-thumbnail->height());
   x -= bounds().x;
   y -= bounds().y;
   return gfx::Rect(x, y, thumbnail->width(), thumbnail->height());
@@ -745,7 +779,7 @@ FileList::ItemInfo FileList::calcFileItemInfo(int i) const
   int len = 0;
 
   if (fi->isFolder() && isListView()) {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     len += theme->parts.folderIconSmall()->bitmap(0)->width() + 2*guiscale();
   }
 
@@ -776,6 +810,16 @@ FileList::ItemInfo FileList::calcFileItemInfo(int i) const
       info.bounds.w = bounds().w;
   }
   return info;
+}
+
+FileList::ItemInfo FileList::getFileItemInfo(int i) const
+{
+  ASSERT(i >= 0 && i < int(m_info.size()));
+
+  if (i >= 0 && i < int(m_info.size()))
+    return m_info[i];
+  else
+    return ItemInfo();
 }
 
 void FileList::makeSelectedFileitemVisible()
@@ -866,7 +910,7 @@ void FileList::selectIndex(int index)
 
 void FileList::generateThumbnailForFileItem(IFileItem* fi)
 {
-  if (fi && animation() == ANI_NONE) {
+  if (fi && fi->needThumbnail() && animation() == ANI_NONE) {
     auto it = std::find(m_generateThumbnailsForTheseItems.begin(),
                         m_generateThumbnailsForTheseItems.end(), fi);
     if (it != m_generateThumbnailsForTheseItems.end())

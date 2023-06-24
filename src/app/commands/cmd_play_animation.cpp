@@ -1,4 +1,5 @@
 // Aseprite
+// Copyright (C) 2022-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -12,7 +13,6 @@
 #include "app/commands/command.h"
 #include "app/context.h"
 #include "app/context_access.h"
-#include "app/modules/editors.h"
 #include "app/pref/preferences.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/main_window.h"
@@ -29,8 +29,9 @@ public:
   PlayAnimationCommand();
 
 protected:
-  bool onEnabled(Context* context) override;
-  void onExecute(Context* context) override;
+  bool onEnabled(Context* ctx) override;
+  bool onChecked(Context* ctx) override;
+  void onExecute(Context* ctx) override;
 };
 
 PlayAnimationCommand::PlayAnimationCommand()
@@ -38,31 +39,39 @@ PlayAnimationCommand::PlayAnimationCommand()
 {
 }
 
-bool PlayAnimationCommand::onEnabled(Context* context)
+bool PlayAnimationCommand::onEnabled(Context* ctx)
 {
-  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
-                             ContextFlags::HasActiveSprite);
+  return ctx->checkFlags(ContextFlags::ActiveDocumentIsReadable |
+                         ContextFlags::HasActiveSprite);
 }
 
-void PlayAnimationCommand::onExecute(Context* context)
+bool PlayAnimationCommand::onChecked(Context* ctx)
+{
+  auto editor = Editor::activeEditor();
+  return (editor && editor->isPlaying());
+}
+
+void PlayAnimationCommand::onExecute(Context* ctx)
 {
   // Do not play one-frame images
   {
-    ContextReader writer(context);
+    ContextReader writer(ctx);
     Sprite* sprite(writer.sprite());
     if (!sprite || sprite->totalFrames() < 2)
       return;
   }
 
-  ASSERT(current_editor);
-  if (!current_editor)
+  auto editor = Editor::activeEditor();
+  ASSERT(editor);
+  if (!editor)
     return;
 
-  if (current_editor->isPlaying())
-    current_editor->stop();
+  if (editor->isPlaying())
+    editor->stop();
   else
-    current_editor->play(Preferences::instance().editor.playOnce(),
-                         Preferences::instance().editor.playAll());
+    editor->play(Preferences::instance().editor.playOnce(),
+                 Preferences::instance().editor.playAll(),
+                 Preferences::instance().editor.playSubtags());
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -72,8 +81,9 @@ public:
   PlayPreviewAnimationCommand();
 
 protected:
-  bool onEnabled(Context* context) override;
-  void onExecute(Context* context) override;
+  bool onEnabled(Context* ctx) override;
+  bool onChecked(Context* ctx) override;
+  void onExecute(Context* ctx) override;
 };
 
 PlayPreviewAnimationCommand::PlayPreviewAnimationCommand()
@@ -81,13 +91,21 @@ PlayPreviewAnimationCommand::PlayPreviewAnimationCommand()
 {
 }
 
-bool PlayPreviewAnimationCommand::onEnabled(Context* context)
+bool PlayPreviewAnimationCommand::onEnabled(Context* ctx)
 {
-  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
-                             ContextFlags::HasActiveSprite);
+  return ctx->checkFlags(ContextFlags::ActiveDocumentIsWritable |
+                         ContextFlags::HasActiveSprite);
 }
 
-void PlayPreviewAnimationCommand::onExecute(Context* context)
+bool PlayPreviewAnimationCommand::onChecked(Context* ctx)
+{
+  PreviewEditorWindow* preview = App::instance()->mainWindow()->getPreviewEditor();
+  return (preview &&
+          preview->previewEditor() &&
+          preview->previewEditor()->isPlaying());
+}
+
+void PlayPreviewAnimationCommand::onExecute(Context* ctx)
 {
   PreviewEditorWindow* preview = App::instance()->mainWindow()->getPreviewEditor();
   if (!preview->isPreviewEnabled())

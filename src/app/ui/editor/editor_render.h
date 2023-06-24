@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2018  David Capello
 //
 // This program is distributed under the terms of
@@ -9,6 +9,7 @@
 #define APP_UI_EDITOR_RENDER_H_INCLUDED
 #pragma once
 
+#include "app/render/renderer.h"
 #include "doc/blend_mode.h"
 #include "doc/color.h"
 #include "doc/frame.h"
@@ -26,10 +27,11 @@ namespace doc {
   class Layer;
   class Palette;
   class Sprite;
+  class Tileset;
 }
 
-namespace render {
-  class Render;
+namespace os {
+  class Surface;
 }
 
 namespace app {
@@ -37,8 +39,20 @@ namespace app {
 
   class EditorRender {
   public:
+    enum Type {
+      kSimpleRenderer,
+      kShaderRenderer,
+    };
+
     EditorRender();
     ~EditorRender();
+
+    Type type() const;
+    void setType(const Type type);
+
+    const Renderer::Properties& properties() const {
+      return m_renderer->properties();
+    }
 
     void setRefLayersVisiblity(const bool visible);
     void setNonactiveLayersOpacity(const int opacity);
@@ -54,6 +68,7 @@ namespace app {
     void setPreviewImage(const doc::Layer* layer,
                          const doc::frame_t frame,
                          const doc::Image* image,
+                         const doc::Tileset* tileset,
                          const gfx::Point& pos,
                          const doc::BlendMode blendMode);
     void removePreviewImage();
@@ -71,16 +86,13 @@ namespace app {
     void disableOnionskin();
 
     void renderSprite(
-      doc::Image* dstImage,
-      const doc::Sprite* sprite,
-      doc::frame_t frame);
-    void renderSprite(
-      doc::Image* dstImage,
+      os::Surface* dstSurface,
       const doc::Sprite* sprite,
       doc::frame_t frame,
       const gfx::ClipF& area);
-    void renderCheckedBackground(
-      doc::Image* image,
+    void renderCheckeredBackground(
+      os::Surface* dstSurface,
+      const doc::Sprite* sprite,
       const gfx::Clip& area);
     void renderImage(
       doc::Image* dst_image,
@@ -91,10 +103,10 @@ namespace app {
       const int opacity,
       const doc::BlendMode blendMode);
 
-    doc::ImageBufferPtr getRenderImageBuffer();
+    static doc::ImageBufferPtr getRenderImageBuffer();
 
   private:
-    render::Render* m_render;
+    std::unique_ptr<Renderer> m_renderer;
   };
 
 } // namespace app

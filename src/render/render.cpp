@@ -1,5 +1,5 @@
 // Aseprite Render Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -11,16 +11,21 @@
 
 #include "render/render.h"
 
-#include "base/clamp.h"
 #include "doc/blend_internals.h"
 #include "doc/blend_mode.h"
 #include "doc/doc.h"
-#include "doc/handle_anidir.h"
 #include "doc/image_impl.h"
+#include "doc/layer_tilemap.h"
+#include "doc/playback.h"
+#include "doc/render_plan.h"
+#include "doc/tileset.h"
+#include "doc/tilesets.h"
 #include "gfx/clip.h"
 #include "gfx/region.h"
 
 #include <cmath>
+
+#define TRACE_RENDER_CEL(...) // TRACE
 
 namespace render {
 
@@ -223,6 +228,18 @@ void composite_image_scale_up(
   int px_x, px_y;
   int px_w = int(sx);
   int px_h = int(sy);
+
+  // We've received crash reports about these values being 0 when it's
+  // called from Render::renderImage() when the projection is scaled
+  // to the cel bounds (this can happen only when a reference layer is
+  // scaled, but when a reference layer is visible we shouldn't be
+  // here, we should be using the composite_image_general(), see the
+  // "finegrain" var in Render::getImageComposition()).
+  ASSERT(px_w > 0);
+  ASSERT(px_h > 0);
+  if (px_w <= 0 || px_h <= 0)
+    return;
+
   int first_px_w = px_w - (area.src.x % px_w);
   int first_px_h = px_h - (area.src.y % px_h);
 
@@ -525,19 +542,18 @@ Render::Render()
   : m_flags(0)
   , m_nonactiveLayersOpacity(255)
   , m_sprite(nullptr)
-  , m_currentLayer(NULL)
+  , m_currentLayer(nullptr)
   , m_currentFrame(0)
   , m_extraType(ExtraType::NONE)
-  , m_extraCel(NULL)
-  , m_extraImage(NULL)
+  , m_extraCel(nullptr)
+  , m_extraImage(nullptr)
   , m_newBlendMethod(true)
-  , m_bgType(BgType::TRANSPARENT)
-  , m_bgCheckedSize(16, 16)
   , m_globalOpacity(255)
   , m_selectedLayerForOpacity(nullptr)
   , m_selectedLayer(nullptr)
   , m_selectedFrame(-1)
   , m_previewImage(nullptr)
+  , m_previewTileset(nullptr)
   , m_previewBlendMode(BlendMode::NORMAL)
   , m_onionskin(OnionskinType::NONE)
 {
@@ -566,29 +582,9 @@ void Render::setProjection(const Projection& projection)
   m_proj = projection;
 }
 
-void Render::setBgType(BgType type)
+void Render::setBgOptions(const BgOptions& bg)
 {
-  m_bgType = type;
-}
-
-void Render::setBgZoom(bool state)
-{
-  m_bgZoom = state;
-}
-
-void Render::setBgColor1(color_t color)
-{
-  m_bgColor1 = color;
-}
-
-void Render::setBgColor2(color_t color)
-{
-  m_bgColor2 = color;
-}
-
-void Render::setBgCheckedSize(const gfx::Size& size)
-{
-  m_bgCheckedSize = size;
+  m_bg = bg;
 }
 
 void Render::setSelectedLayer(const Layer* layer)
@@ -599,12 +595,14 @@ void Render::setSelectedLayer(const Layer* layer)
 void Render::setPreviewImage(const Layer* layer,
                              const frame_t frame,
                              const Image* image,
+                             const Tileset* tileset,
                              const gfx::Point& pos,
                              const BlendMode blendMode)
 {
   m_selectedLayer = layer;
   m_selectedFrame = frame;
   m_previewImage = image;
+  m_previewTileset = tileset;
   m_previewPos = pos;
   m_previewBlendMode = blendMode;
 }
@@ -626,12 +624,13 @@ void Render::setExtraImage(
 void Render::removePreviewImage()
 {
   m_previewImage = nullptr;
+  m_previewTileset = nullptr;
 }
 
 void Render::removeExtraImage()
 {
   m_extraType = ExtraType::NONE;
-  m_extraCel = NULL;
+  m_extraCel = nullptr;
 }
 
 void Render::setOnionskin(const OnionskinOptions& options)
@@ -674,16 +673,20 @@ void Render::renderLayer(
 
   CompositeImageFunc compositeImage =
     getImageComposition(
-      dstImage->pixelFormat(),
+      (dstImage->pixelFormat() != IMAGE_TILEMAP ? dstImage->pixelFormat():
+                                                  m_sprite->pixelFormat()),
       m_sprite->pixelFormat(), layer);
   if (!compositeImage)
     return;
 
   m_globalOpacity = 255;
-  renderLayer(
-    layer, dstImage, area,
+
+  doc::RenderPlan plan;
+  plan.addLayer(layer, frame);
+  renderPlan(
+    plan, dstImage, area,
     frame, compositeImage,
-    true, true, blendMode, false);
+    true, true, blendMode);
 }
 
 void Render::renderSprite(
@@ -719,15 +722,15 @@ void Render::renderSprite(
   // New Blending Method:
   if (m_newBlendMethod) {
     // Clear dstImage with the bg_color (if the background is not a
-    // special background pattern like the checked background, this is
-    // enough as a base color).
+    // special background pattern like the checkered background, this
+    // is enough as a base color).
     fill_rect(dstImage, area.dstBounds(), bg_color);
 
     // Draw the Background layer - Onion skin behind the sprite - Transparent Layers
     renderSpriteLayers(dstImage, area, frame, compositeImage);
 
     // In case that we need a special background (e.g. like the
-    // checked pattern), we can draw the background in a temporal
+    // checkered pattern), we can draw the background in a temporal
     // image and then merge this temporal image with the dstImage.
     if (!isSolidBackground(bgLayer, bg_color)) {
       if (!m_tmpBuf)
@@ -765,25 +768,28 @@ void Render::renderSprite(
       area,
       getImageComposition(
         dstImage->pixelFormat(),
-        m_previewImage->pixelFormat(), sprite->root()),
+        m_previewImage->pixelFormat(),
+        sprite->root()),
       255,
       m_previewBlendMode);
   }
 }
 
 void Render::renderSpriteLayers(Image* dstImage,
-                              const gfx::ClipF& area,
-                              frame_t frame,
-                              CompositeImageFunc compositeImage)
+                                const gfx::ClipF& area,
+                                frame_t frame,
+                                CompositeImageFunc compositeImage)
 {
+  doc::RenderPlan plan;
+  plan.addLayer(m_sprite->root(), frame);
+
   // Draw the background layer.
   m_globalOpacity = 255;
-  renderLayer(m_sprite->root(), dstImage,
-              area, frame, compositeImage,
-              true,
-              false,
-              BlendMode::UNSPECIFIED,
-              false);
+  renderPlan(plan, dstImage,
+             area, frame, compositeImage,
+             true,
+             false,
+             BlendMode::UNSPECIFIED);
 
   // Draw onion skin behind the sprite.
   if (m_onionskin.position() == OnionskinPosition::BEHIND)
@@ -791,11 +797,11 @@ void Render::renderSpriteLayers(Image* dstImage,
 
   // Draw the transparent layers.
   m_globalOpacity = 255;
-  renderLayer(m_sprite->root(), dstImage,
-              area, frame, compositeImage,
-              false,
-              true,
-              BlendMode::UNSPECIFIED, false);
+  renderPlan(plan, dstImage,
+             area, frame, compositeImage,
+             false,
+             true,
+             BlendMode::UNSPECIFIED);
 }
 
 void Render::renderBackground(Image* image,
@@ -807,9 +813,9 @@ void Render::renderBackground(Image* image,
     fill_rect(image, area.dstBounds(), bg_color);
   }
   else {
-    switch (m_bgType) {
-      case BgType::CHECKED:
-        renderCheckedBackground(image, area);
+    switch (m_bg.type) {
+      case BgType::CHECKERED:
+        renderCheckeredBackground(image, area);
         if (bgLayer && bgLayer->isVisible() &&
             // TODO Review this: bg_color can be an index (not an rgba())
             //      when sprite and dstImage are indexed
@@ -835,7 +841,7 @@ bool Render::isSolidBackground(
   const color_t bg_color) const
 {
   return
-    ((m_bgType != BgType::CHECKED) ||
+    ((m_bg.type != BgType::CHECKERED) ||
      (bgLayer && bgLayer->isVisible() &&
       // TODO Review this: bg_color can be an index (not an rgba())
       //      when sprite and dstImage are indexed
@@ -854,21 +860,20 @@ void Render::renderOnionskin(
     Tag* loop = m_onionskin.loopTag();
     Layer* onionLayer = (m_onionskin.layer() ? m_onionskin.layer():
                                                m_sprite->root());
-    frame_t frameIn;
+    Playback play(
+      m_sprite,
+      TagsList(),  // TODO add an onionskin option to iterate subtags
+      frame,
+      loop ? Playback::PlayInLoop : Playback::PlayAll,
+      loop);
+    frame_t prevFrames = (loop ? m_onionskin.prevFrames():
+                                 std::min(frame, m_onionskin.prevFrames()));
+    play.nextFrame(-prevFrames);
 
-    for (frame_t frameOut = frame - m_onionskin.prevFrames();
+    for (frame_t frameOut = frame - prevFrames;
          frameOut <= frame + m_onionskin.nextFrames();
-         ++frameOut) {
-      if (loop) {
-        bool pingPongForward = true;
-        frameIn =
-          calculate_next_frame(m_sprite,
-                               frame, frameOut - frame,
-                               loop, pingPongForward);
-      }
-      else {
-        frameIn = frameOut;
-      }
+         ++frameOut, play.nextFrame()) {
+      const frame_t frameIn = play.frame();
 
       if (frameIn == frame ||
           frameIn < 0 ||
@@ -883,7 +888,7 @@ void Render::renderOnionskin(
         m_globalOpacity = m_onionskin.opacityBase() - m_onionskin.opacityStep() * ((frameOut - frame)-1);
       }
 
-      m_globalOpacity = base::clamp(m_globalOpacity, 0, 255);
+      m_globalOpacity = std::clamp(m_globalOpacity, 0, 255);
       if (m_globalOpacity > 0) {
         BlendMode blendMode = BlendMode::UNSPECIFIED;
         if (m_onionskin.type() == OnionskinType::MERGE)
@@ -891,28 +896,30 @@ void Render::renderOnionskin(
         else if (m_onionskin.type() == OnionskinType::RED_BLUE_TINT)
           blendMode = (frameOut < frame ? BlendMode::RED_TINT: BlendMode::BLUE_TINT);
 
-        renderLayer(
-          onionLayer, dstImage,
+        doc::RenderPlan plan;
+        plan.addLayer(onionLayer, frameIn);
+        renderPlan(
+          plan, dstImage,
           area, frameIn, compositeImage,
           // Render background only for "in-front" onion skinning and
           // when opacity is < 255
           (m_globalOpacity < 255 &&
            m_onionskin.position() == OnionskinPosition::INFRONT),
-          true, blendMode, false);
+          true, blendMode);
       }
     }
   }
 }
 
-void Render::renderCheckedBackground(
+void Render::renderCheckeredBackground(
   Image* image,
   const gfx::Clip& area)
 {
   int x, y, u, v;
-  int tile_w = m_bgCheckedSize.w;
-  int tile_h = m_bgCheckedSize.h;
+  int tile_w = m_bg.stripeSize.w;
+  int tile_h = m_bg.stripeSize.h;
 
-  if (m_bgZoom) {
+  if (m_bg.zoom) {
     tile_w = m_proj.zoom().apply(tile_w);
     tile_h = m_proj.zoom().apply(tile_h);
   }
@@ -931,19 +938,20 @@ void Render::renderCheckedBackground(
 
   gfx::Rect dstBounds = area.dstBounds();
 
-  // Fix background color (make them opaque)
-  switch (image->pixelFormat()) {
+  // Fix background colors (make them opaque)
+  ASSERT(m_bg.colorPixelFormat == image->pixelFormat());
+  switch (m_bg.colorPixelFormat) {
     case IMAGE_RGB:
-      m_bgColor1 |= doc::rgba_a_mask;
-      m_bgColor2 |= doc::rgba_a_mask;
+      m_bg.color1 |= doc::rgba_a_mask;
+      m_bg.color2 |= doc::rgba_a_mask;
       break;
     case IMAGE_GRAYSCALE:
-      m_bgColor1 |= doc::graya_a_mask;
-      m_bgColor2 |= doc::graya_a_mask;
+      m_bg.color1 |= doc::graya_a_mask;
+      m_bg.color2 |= doc::graya_a_mask;
       break;
   }
 
-  // Draw checked background (tile by tile)
+  // Draw checkered background (tile by tile)
   int u_start = u;
   for (y=y_start-tile_h; y<image->height()+tile_h; y+=tile_h) {
     for (x=x_start-tile_w; x<image->width()+tile_w; x+=tile_w) {
@@ -951,7 +959,7 @@ void Render::renderCheckedBackground(
       if (!fillRc.isEmpty())
         fill_rect(
           image, fillRc.x, fillRc.y, fillRc.x+fillRc.w-1, fillRc.y+fillRc.h-1,
-          (((u+v))&1)? m_bgColor2: m_bgColor1);
+          (((u+v))&1)? m_bg.color2: m_bg.color1);
       ++u;
     }
     u = u_start;
@@ -986,200 +994,191 @@ void Render::renderImage(
     m_newBlendMethod);
 }
 
-void Render::renderLayer(
-  const Layer* layer,
+void Render::renderPlan(
+  RenderPlan& plan,
   Image* image,
   const gfx::Clip& area,
   const frame_t frame,
   const CompositeImageFunc compositeImage,
   const bool render_background,
   const bool render_transparent,
-  const BlendMode blendMode,
-  bool isSelected)
+  const BlendMode blendMode)
 {
-  // we can't read from this layer
-  if (!layer->isVisible())
-    return;
+  for (const auto& item : plan.items()) {
+    const Cel* cel = item.cel;
+    const Layer* layer = item.layer;
 
-  if (m_selectedLayerForOpacity == layer)
-    isSelected = true;
+    ASSERT(layer->isVisible()); // Hidden layers shouldn't be in the plan
 
-  const Cel* cel = nullptr;
-  gfx::Rect extraArea;
-  bool drawExtra = false;
+    const bool isSelected = (m_selectedLayerForOpacity == layer);
+    gfx::Rect extraArea;
+    bool drawExtra = false;
 
-  if (m_extraCel &&
-      m_extraImage &&
-      layer == m_currentLayer &&
-      ((layer->isBackground() && render_background) ||
-       (!layer->isBackground() && render_transparent))) {
-    if (frame == m_extraCel->frame() &&
-        frame == m_currentFrame) { // TODO this double check is not necessary
-      drawExtra = true;
-    }
-    else {
-      // Check if we can draw the extra cel when we render a linked
-      // frame.
-      cel = layer->cel(frame);
-      Cel* cel2 = layer->cel(m_extraCel->frame());
-      if (cel && cel2 &&
-          cel->data() == cel2->data()) {
+    if (m_extraCel &&
+        m_extraImage &&
+        layer == m_currentLayer &&
+        ((layer->isBackground() && render_background) ||
+         (!layer->isBackground() && render_transparent)) &&
+        // Don't use a tilemap extra cel (IMAGE_TILEMAP) in a
+        // non-tilemap layer (in the other hand tilemap layers allow
+        // extra cels of any kind). This fixes a crash on renderCel()
+        // when we were painting the Preview window using a tilemap
+        // extra image to patch a regular layer, when switching from a
+        // tilemap layer to a regular layer.
+        ((layer->isTilemap()) ||
+         (!layer->isTilemap() && m_extraImage->pixelFormat() != IMAGE_TILEMAP))) {
+      if (frame == m_extraCel->frame() &&
+          frame == m_currentFrame) { // TODO this double check is not necessary
         drawExtra = true;
       }
+      else {
+        // Check if we can draw the extra cel when we render a linked
+        // frame.
+        const Cel* cel2 = layer->cel(m_extraCel->frame());
+        if (cel && cel2 &&
+            cel->data() == cel2->data()) {
+          drawExtra = true;
+        }
+      }
     }
-  }
 
-  if (drawExtra) {
-    extraArea = gfx::Rect(
-      m_extraCel->x(),
-      m_extraCel->y(),
-      m_extraImage->width(),
-      m_extraImage->height());
-    extraArea = m_proj.apply(extraArea);
-    if (m_proj.scaleX() < 1.0) extraArea.w--;
-    if (m_proj.scaleY() < 1.0) extraArea.h--;
-    if (extraArea.w < 1) extraArea.w = 1;
-    if (extraArea.h < 1) extraArea.h = 1;
-  }
+    if (drawExtra) {
+      extraArea = m_extraCel->bounds();
+      extraArea = m_proj.apply(extraArea);
+      if (m_proj.scaleX() < 1.0) extraArea.w--;
+      if (m_proj.scaleY() < 1.0) extraArea.h--;
+      if (extraArea.w < 1) extraArea.w = 1;
+      if (extraArea.h < 1) extraArea.h = 1;
+    }
 
-  switch (layer->type()) {
+    switch (layer->type()) {
 
-    case ObjectType::LayerImage: {
-      if ((!render_background  &&  layer->isBackground()) ||
-          (!render_transparent && !layer->isBackground()))
-        break;
+      case ObjectType::LayerImage:
+      case ObjectType::LayerTilemap: {
+        if ((!render_background  &&  layer->isBackground()) ||
+            (!render_transparent && !layer->isBackground()))
+          break;
 
-      // Ignore reference layers
-      if (!(m_flags & Flags::ShowRefLayers) &&
-          layer->isReference())
-        break;
+        // Ignore reference layers
+        if (!(m_flags & Flags::ShowRefLayers) &&
+            layer->isReference())
+          break;
 
-      if (!cel)
-        cel = layer->cel(frame);
+        if (!cel)
+          cel = layer->cel(frame);
 
-      if (cel) {
-        Palette* pal = m_sprite->palette(frame);
-        const Image* celImage = nullptr;
-        gfx::RectF celBounds;
+        if (cel) {
+          Palette* pal = m_sprite->palette(frame);
+          const Image* celImage = nullptr;
+          gfx::RectF celBounds;
 
-        // Is the 'm_previewImage' set to be used with this layer?
-        bool usePreview = false;
-        if ((m_previewImage) &&
-            (m_selectedLayer == layer)) {
-          if (m_selectedFrame == frame) {
-            usePreview = true;
+          // Is the 'm_previewImage' set to be used with this layer?
+          if (m_previewImage &&
+              checkIfWeShouldUsePreview(cel)) {
+            celImage = m_previewImage;
+            celBounds = gfx::RectF(m_previewPos.x,
+                                   m_previewPos.y,
+                                   m_previewImage->width(),
+                                   m_previewImage->height());
           }
+          // If not, we use the original cel-image from the images' stock
           else {
-            // This preview might be useful if we are rendering a
-            // linked frame to the preview.
-            Cel* cel2 = layer->cel(m_selectedFrame);
-            if (cel2->data() == cel->data()) {
-              usePreview = true;
+            celImage = cel->image();
+            if (layer->isReference())
+              celBounds = cel->boundsF();
+            else
+              celBounds = cel->bounds();
+          }
+
+          if (celImage) {
+            const LayerImage* imgLayer = static_cast<const LayerImage*>(layer);
+            BlendMode layerBlendMode =
+              (blendMode == BlendMode::UNSPECIFIED ?
+               imgLayer->blendMode():
+               blendMode);
+
+            ASSERT(cel->opacity() >= 0);
+            ASSERT(cel->opacity() <= 255);
+            ASSERT(imgLayer->opacity() >= 0);
+            ASSERT(imgLayer->opacity() <= 255);
+
+            // Multiple three opacities: cel*layer*global (*nonactive-layer-opacity)
+            int t;
+            int opacity = cel->opacity();
+            opacity = MUL_UN8(opacity, imgLayer->opacity(), t);
+            opacity = MUL_UN8(opacity, m_globalOpacity, t);
+            if (!isSelected && m_nonactiveLayersOpacity != 255)
+              opacity = MUL_UN8(opacity, m_nonactiveLayersOpacity, t);
+
+            // Generally this is just one pass, but if we are using
+            // OVER_COMPOSITE extra cel, this will be two passes.
+            for (int pass=0; pass<2; ++pass) {
+              // Draw parts outside the "m_extraCel" area
+              if (drawExtra && m_extraType == ExtraType::PATCH) {
+                gfx::Region originalAreas(area.srcBounds());
+                originalAreas.createSubtraction(
+                  originalAreas, gfx::Region(extraArea));
+
+                for (auto rc : originalAreas) {
+                  renderCel(
+                    image, cel, celImage, layer, pal, celBounds,
+                    gfx::Clip(area.dst.x+rc.x-area.src.x,
+                              area.dst.y+rc.y-area.src.y, rc),
+                    compositeImage, opacity, layerBlendMode);
+                }
+              }
+              // Draw the whole cel
+              else {
+                renderCel(
+                  image, cel, celImage, layer, pal,
+                  celBounds, area, compositeImage,
+                  opacity, layerBlendMode);
+              }
+
+              if (m_extraType == ExtraType::OVER_COMPOSITE &&
+                  layer == m_currentLayer &&
+                  pass == 0) {
+                // Go for second pass with the extra blend mode...
+                layerBlendMode = m_extraBlendMode;
+              }
+              else
+                break;
             }
           }
         }
-
-        // If not, we use the original cel-image from the images' stock
-        if (usePreview) {
-          celImage = m_previewImage;
-          celBounds = gfx::RectF(m_previewPos.x,
-                                 m_previewPos.y,
-                                 m_previewImage->width(),
-                                 m_previewImage->height());
-
-          ASSERT(celImage->pixelFormat() == cel->image()->pixelFormat());
-        }
-        else {
-          celImage = cel->image();
-          if (cel->layer()->isReference())
-            celBounds = cel->boundsF();
-          else
-            celBounds = cel->bounds();
-        }
-
-        if (celImage) {
-          const LayerImage* imgLayer = static_cast<const LayerImage*>(layer);
-          const BlendMode layerBlendMode =
-            (blendMode == BlendMode::UNSPECIFIED ?
-             imgLayer->blendMode():
-             blendMode);
-
-          ASSERT(cel->opacity() >= 0);
-          ASSERT(cel->opacity() <= 255);
-          ASSERT(imgLayer->opacity() >= 0);
-          ASSERT(imgLayer->opacity() <= 255);
-
-          // Multiple three opacities: cel*layer*global (*nonactive-layer-opacity)
-          int t;
-          int opacity = cel->opacity();
-          opacity = MUL_UN8(opacity, imgLayer->opacity(), t);
-          opacity = MUL_UN8(opacity, m_globalOpacity, t);
-          if (!isSelected && m_nonactiveLayersOpacity != 255)
-            opacity = MUL_UN8(opacity, m_nonactiveLayersOpacity, t);
-
-          ASSERT(celImage->maskColor() == m_sprite->transparentColor());
-
-          // Draw parts outside the "m_extraCel" area
-          if (drawExtra && m_extraType == ExtraType::PATCH) {
-            gfx::Region originalAreas(area.srcBounds());
-            originalAreas.createSubtraction(
-              originalAreas, gfx::Region(extraArea));
-
-            for (auto rc : originalAreas) {
-              renderCel(
-                image, celImage, pal, celBounds,
-                gfx::Clip(area.dst.x+rc.x-area.src.x,
-                          area.dst.y+rc.y-area.src.y, rc), compositeImage,
-                opacity, layerBlendMode);
-            }
-          }
-          // Draw the whole cel
-          else {
-            renderCel(
-              image, celImage, pal,
-              celBounds, area, compositeImage,
-              opacity, layerBlendMode);
-          }
-        }
+        break;
       }
-      break;
+
+      case ObjectType::LayerGroup:
+        ASSERT(false);
+        break;
+
     }
 
-    case ObjectType::LayerGroup: {
-      for (const Layer* child : static_cast<const LayerGroup*>(layer)->layers()) {
-        renderLayer(
-          child, image,
-          area, frame,
-          compositeImage,
-          render_background,
-          render_transparent,
-          blendMode,
-          isSelected);
+    // Draw extras
+    if (drawExtra && m_extraType != ExtraType::NONE) {
+      if (m_extraCel->opacity() > 0) {
+        renderCel(
+          image,
+          m_extraCel,
+          m_sprite,
+          m_extraImage,
+          m_currentLayer, // Current layer (useful to use get the tileset if extra cel is a tilemap)
+          m_sprite->palette(frame),
+          m_extraCel->bounds(),
+          gfx::Clip(area.dst.x+extraArea.x-area.src.x,
+                    area.dst.y+extraArea.y-area.src.y,
+                    extraArea),
+          m_extraCel->opacity(),
+          m_extraBlendMode);
       }
-      break;
-    }
-
-  }
-
-  // Draw extras
-  if (drawExtra && m_extraType != ExtraType::NONE) {
-    if (m_extraCel->opacity() > 0) {
-      renderCel(
-        image, m_extraImage,
-        m_sprite->palette(frame),
-        m_extraCel->bounds(),
-        gfx::Clip(area.dst.x+extraArea.x-area.src.x,
-                  area.dst.y+extraArea.y-area.src.y,
-                  extraArea),
-        compositeImage,
-        m_extraCel->opacity(),
-        m_extraBlendMode);
     }
   }
 }
 
 void Render::renderCel(
   Image* dst_image,
+  const Cel* cel,
   const Sprite* sprite,
   const Image* cel_image,
   const Layer* cel_layer,
@@ -1200,7 +1199,9 @@ void Render::renderCel(
 
   renderCel(
     dst_image,
+    cel,
     cel_image,
+    cel_layer,
     pal,
     celBounds,
     area,
@@ -1211,7 +1212,9 @@ void Render::renderCel(
 
 void Render::renderCel(
   Image* dst_image,
+  const Cel* cel,
   const Image* cel_image,
+  const Layer* cel_layer,
   const Palette* pal,
   const gfx::RectF& celBounds,
   const gfx::Clip& area,
@@ -1219,14 +1222,91 @@ void Render::renderCel(
   const int opacity,
   const BlendMode blendMode)
 {
-  renderImage(dst_image,
-              cel_image,
-              pal,
-              celBounds,
-              area,
-              compositeImage,
-              opacity,
-              blendMode);
+  TRACE_RENDER_CEL("dstImage=(%d %d) celImage=(%d %d) celBounds=(%d %d %d %d) clipArea=(src=%d %d dst=%d %d %d %d)\n",
+                   dst_image->width(), dst_image->height(),
+                   cel_image->width(), cel_image->height(),
+                   int(celBounds.x), int(celBounds.y),
+                   int(celBounds.w), int(celBounds.h),
+                   area.src.x, area.src.y, area.dst.x, area.dst.y, area.size.w, area.size.h);
+
+  if (cel_layer &&
+      cel_image->pixelFormat() == IMAGE_TILEMAP) {
+    ASSERT(cel_layer->isTilemap());
+
+    if (area.size.w < 1 ||
+        area.size.h < 1)
+      return;
+
+    auto tilemapLayer = static_cast<const LayerTilemap*>(cel_layer);
+    doc::Grid grid = tilemapLayer->tileset()->grid();
+    grid.origin(grid.origin() + gfx::Point(celBounds.origin()));
+
+    // Is the 'm_previewTileset' set to be used with this layer?
+    const Tileset* tileset;
+    if (m_previewTileset && cel &&
+        checkIfWeShouldUsePreview(cel)) {
+      tileset = m_previewTileset;
+    }
+    else {
+      tileset = tilemapLayer->tileset();
+      ASSERT(tileset);
+      if (!tileset)
+        return;
+    }
+
+    gfx::Rect tilesToDraw = grid.canvasToTile(
+      m_proj.remove(gfx::Rect(area.src, area.size)));
+
+    int yPixelsPerTile = m_proj.applyY(grid.tileSize().h);
+    if (yPixelsPerTile > 0 && (area.size.h + area.src.y) % yPixelsPerTile > 0)
+      tilesToDraw.h += 1;
+    int xPixelsPerTile = m_proj.applyX(grid.tileSize().w);
+    if (xPixelsPerTile > 0 && (area.size.w + area.src.x) % xPixelsPerTile > 0)
+      tilesToDraw.w += 1;
+
+    // As area.size is not empty at this point, we have to draw at
+    // least one tile (and the clipping will be performed for the
+    // tile pixels later).
+    if (tilesToDraw.w < 1) tilesToDraw.w = 1;
+    if (tilesToDraw.h < 1) tilesToDraw.h = 1;
+
+    tilesToDraw &= cel_image->bounds();
+
+    TRACE_RENDER_CEL("Drawing tilemap (%d %d %d %d)\n",
+                     tilesToDraw.x, tilesToDraw.y, tilesToDraw.w, tilesToDraw.h);
+
+    for (int v=tilesToDraw.y; v<tilesToDraw.y2(); ++v) {
+      for (int u=tilesToDraw.x; u<tilesToDraw.x2(); ++u) {
+        auto tileBoundsOnCanvas = grid.tileToCanvas(gfx::Rect(u, v, 1, 1));
+        TRACE_RENDER_CEL(" - tile (%d %d) -> (%d %d %d %d)\n", u, v,
+                         tileBoundsOnCanvas.x, tileBoundsOnCanvas.y,
+                         tileBoundsOnCanvas.w, tileBoundsOnCanvas.h);
+        if (!cel_image->bounds().contains(u, v))
+          continue;
+
+        const tile_t t = cel_image->getPixel(u, v);
+        if (t != doc::notile) {
+          const tile_index i = tile_geti(t);
+
+          if (dst_image->pixelFormat() == IMAGE_TILEMAP) {
+            put_pixel(dst_image, u-area.dst.x, v-area.dst.y, t);
+          }
+          else {
+            const ImageRef tile_image = tileset->get(i);
+            if (!tile_image)
+              continue;
+
+            renderImage(dst_image, tile_image.get(), pal, tileBoundsOnCanvas,
+                        area, compositeImage, opacity, blendMode);
+          }
+        }
+      }
+    }
+  }
+  else {
+    renderImage(dst_image, cel_image, pal, celBounds,
+                area, compositeImage, opacity, blendMode);
+  }
 }
 
 void Render::renderImage(
@@ -1270,10 +1350,10 @@ CompositeImageFunc Render::getImageComposition(
   // image n-times (where n is the zoom scale).
   double intpart;
   const bool finegrain =
-    (!m_bgZoom && (m_bgCheckedSize.w < m_proj.applyX(1) ||
-                   m_bgCheckedSize.h < m_proj.applyY(1) ||
-                   std::modf(double(m_bgCheckedSize.w) / m_proj.applyX(1.0), &intpart) != 0.0 ||
-                   std::modf(double(m_bgCheckedSize.h) / m_proj.applyY(1.0), &intpart) != 0.0)) ||
+    (!m_bg.zoom && (m_bg.stripeSize.w < m_proj.applyX(1) ||
+                    m_bg.stripeSize.h < m_proj.applyY(1) ||
+                    std::modf(double(m_bg.stripeSize.w) / m_proj.applyX(1.0), &intpart) != 0.0 ||
+                    std::modf(double(m_bg.stripeSize.h) / m_proj.applyY(1.0), &intpart) != 0.0)) ||
     (layer &&
      layer->isGroup() &&
      has_visible_reference_layers(static_cast<const LayerGroup*>(layer)));
@@ -1303,10 +1383,35 @@ CompositeImageFunc Render::getImageComposition(
         case IMAGE_INDEXED:   return get_fastest_composition_path<IndexedTraits, IndexedTraits>(m_proj, finegrain);
       }
       break;
+
+    case IMAGE_TILEMAP:
+      switch (dstFormat) {
+        case IMAGE_TILEMAP:
+          return get_fastest_composition_path<TilemapTraits, TilemapTraits>(m_proj, finegrain);
+      }
+      break;
   }
 
+  TRACE_RENDER_CEL("Render::getImageComposition srcFormat", srcFormat, "dstFormat", dstFormat);
   ASSERT(false && "Invalid pixel formats");
   return nullptr;
+}
+
+bool Render::checkIfWeShouldUsePreview(const Cel* cel) const
+{
+  if ((m_selectedLayer == cel->layer())) {
+    if (m_selectedFrame == cel->frame()) {
+      return true;
+    }
+    else if (cel->layer()) {
+      // This preview might be useful if we are rendering a linked
+      // frame to preview.
+      Cel* cel2 = cel->layer()->cel(m_selectedFrame);
+      if (cel2 && cel2->data() == cel->data())
+        return true;
+    }
+  }
+  return false;
 }
 
 void composite_image(Image* dst,

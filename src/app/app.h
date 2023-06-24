@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -86,6 +86,7 @@ namespace app {
     // scripts.
     int initialize(const AppOptions& options);
     void run();
+    void close();
 
     AppMod* mod() const { return m_mod; }
     tools::ToolBox* toolBox() const;
@@ -126,6 +127,12 @@ namespace app {
     obs::signal<void()> ColorSpaceChange;
     obs::signal<void()> PalettePresetsChange;
 
+    // Signal triggered for TileManagementPlugin that want to create a
+    // tile on-the-fly when the active tilemap cel is empty (it's like
+    // a way to customize the "tilemap/tileset", instead of
+    // Manual/Auto/Semi, the plugin can offer a custom behavior).
+    obs::signal<void()> BeforePaintEmptyTilemap;
+
   private:
     class CoreModules;
     class LoadLanguage;
@@ -135,16 +142,16 @@ namespace app {
 
     AppMod* m_mod;
     std::unique_ptr<ui::UISystem> m_uiSystem;
-    CoreModules* m_coreModules;
-    Modules* m_modules;
-    LegacyModules* m_legacy;
+    std::unique_ptr<CoreModules> m_coreModules;
+    std::unique_ptr<Modules> m_modules;
+    std::unique_ptr<LegacyModules> m_legacy;
     bool m_isGui;
     bool m_isShell;
     std::unique_ptr<MainWindow> m_mainWindow;
     base::paths m_files;
 #ifdef ENABLE_UI
     std::unique_ptr<AppBrushes> m_brushes;
-    BackupIndicator* m_backupIndicator;
+    std::unique_ptr<BackupIndicator> m_backupIndicator;
 #endif // ENABLE_UI
 #ifdef ENABLE_SCRIPTING
     std::unique_ptr<script::Engine> m_engine;
@@ -159,6 +166,7 @@ namespace app {
   void app_rebuild_documents_tabs();
   PixelFormat app_get_current_pixel_format();
   int app_get_color_to_clear_layer(doc::Layer* layer);
+  void app_configure_drm();
 
 } // namespace app
 

@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -50,10 +50,10 @@ WidgetType ButtonBase::behaviorType() const
   return m_behaviorType;
 }
 
-void ButtonBase::onClick(Event& ev)
+void ButtonBase::onClick()
 {
   // Fire Click() signal
-  Click(ev);
+  Click();
 }
 
 bool ButtonBase::onProcessMessage(Message* msg)
@@ -80,8 +80,11 @@ bool ButtonBase::onProcessMessage(Message* msg)
       KeyScancode scancode = keymsg->scancode();
 
       if (isEnabled() && isVisible()) {
-        bool mnemonicPressed =
-          ((msg->altPressed() || msg->cmdPressed()) &&
+        const bool mnemonicPressed =
+          (mnemonic() &&
+           (!mnemonicRequiresModifiers() ||
+            msg->altPressed() ||
+            msg->cmdPressed()) &&
            isMnemonicPressed(keymsg));
 
         // For kButtonWidget
@@ -147,8 +150,7 @@ bool ButtonBase::onProcessMessage(Message* msg)
 
           case kCheckWidget: {
             // Fire onClick() event
-            Event ev(this);
-            onClick(ev);
+            onClick();
             return true;
           }
 
@@ -165,6 +167,8 @@ bool ButtonBase::onProcessMessage(Message* msg)
 
             m_pressedStatus = isSelected();
             captureMouse();
+
+            onStartDrag();
           }
           return true;
 
@@ -174,6 +178,8 @@ bool ButtonBase::onProcessMessage(Message* msg)
 
             m_pressedStatus = isSelected();
             captureMouse();
+
+            onStartDrag();
           }
           return true;
 
@@ -186,6 +192,8 @@ bool ButtonBase::onProcessMessage(Message* msg)
 
               m_pressedStatus = isSelected();
               captureMouse();
+
+              onStartDrag();
             }
           }
           return true;
@@ -206,8 +214,7 @@ bool ButtonBase::onProcessMessage(Message* msg)
             case kCheckWidget:
               {
                 // Fire onClick() event
-                Event ev(this);
-                onClick(ev);
+                onClick();
 
                 invalidate();
               }
@@ -219,8 +226,7 @@ bool ButtonBase::onProcessMessage(Message* msg)
                 setSelected(true);
 
                 // Fire onClick() event
-                Event ev(this);
-                onClick(ev);
+                onClick();
               }
               break;
           }
@@ -231,19 +237,8 @@ bool ButtonBase::onProcessMessage(Message* msg)
 
     case kMouseMoveMessage:
       if (isEnabled() && hasCapture()) {
-        bool hasMouse = hasMouseOver();
-
         m_handleSelect = false;
-
-        // Switch state when the mouse go out
-        if ((hasMouse && isSelected() != m_pressedStatus) ||
-            (!hasMouse && isSelected() == m_pressedStatus)) {
-          if (hasMouse)
-            setSelected(m_pressedStatus);
-          else
-            setSelected(!m_pressedStatus);
-        }
-
+        onSelectWhenDragging();
         m_handleSelect = true;
       }
       break;
@@ -265,8 +260,26 @@ void ButtonBase::generateButtonSelectSignal()
   setSelected(false);
 
   // Fire onClick() event
-  Event ev(this);
-  onClick(ev);
+  onClick();
+}
+
+void ButtonBase::onStartDrag()
+{
+  // Do nothing
+}
+
+void ButtonBase::onSelectWhenDragging()
+{
+  bool hasMouse = hasMouseOver();
+
+  // Switch state when the mouse go out
+  if ((hasMouse && isSelected() != m_pressedStatus) ||
+      (!hasMouse && isSelected() == m_pressedStatus)) {
+    if (hasMouse)
+      setSelected(m_pressedStatus);
+    else
+      setSelected(!m_pressedStatus);
+  }
 }
 
 // ======================================================================

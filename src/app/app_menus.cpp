@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -16,6 +16,7 @@
 #include "app/commands/commands.h"
 #include "app/commands/params.h"
 #include "app/console.h"
+#include "app/extensions.h"
 #include "app/gui_xml.h"
 #include "app/i18n/strings.h"
 #include "app/recent_files.h"
@@ -282,12 +283,33 @@ AppMenuItem::Native get_native_shortcut_for_command(
   return native;
 }
 
+void destroy_menu_item(ui::Widget* item)
+{
+  if (item->parent())
+    item->parent()->removeChild(item);
+
+  if (auto appItem = dynamic_cast<AppMenuItem*>(item)) {
+    if (appItem)
+      appItem->disposeNative();
+  }
+
+  item->deferDelete();
+}
+
 } // anonymous namespace
 
 os::Shortcut get_os_shortcut_from_key(const Key* key)
 {
   if (key && !key->accels().empty()) {
     const ui::Accelerator& accel = key->accels().front();
+
+#ifdef __APPLE__
+    // Shortcuts with spacebar as modifier do not work well in macOS
+    // (they will be called when the space bar is unpressed too).
+    if ((accel.modifiers() & ui::kKeySpaceModifier) == ui::kKeySpaceModifier)
+      return os::Shortcut();
+#endif
+
     return os::Shortcut(
       (accel.unicodeChar() ? accel.unicodeChar():
                              from_scancode_to_unicode(accel.scancode())),
@@ -332,9 +354,12 @@ void AppMenus::reload()
   for (auto& it : m_groups) {
     GroupInfo& group = it.second;
     MENUS_TRACE("MENUS: - groups", it.first, "with", group.items.size(), "item(s)");
-    group.end = nullptr;        // This value will be restored later
+
     for (auto& item : group.items)
-      item->parent()->removeChild(item);
+      group.menu->removeChild(item);
+
+    // These values will be restored later
+    group.end = nullptr;
   }
 
   ////////////////////////////////////////
@@ -384,16 +409,32 @@ void AppMenus::reload()
 #endif
   }
 
+  // Remove the "Enter license" menu item when DRM is not enabled.
+#ifndef ENABLE_DRM
+  if (auto helpMenuItem = m_rootMenu->findItemById("help_menu")) {
+    if (Menu* helpMenu = dynamic_cast<MenuItem*>(helpMenuItem)->getSubmenu()) {
+      delete helpMenu->findChild("enter_license_separator");
+      delete helpMenu->findChild("enter_license");
+    }
+
+    auto it = m_groups.find("help_enter_license");
+    if (it != m_groups.end())
+      m_groups.erase(it);
+  }
+#endif
+
   ////////////////////////////////////////
   // Re-add menu items in groups (recent files & scripts)
 
   for (auto& it : m_groups) {
     GroupInfo& group = it.second;
-    if (group.end) {
+    if (group.menu) {
       MENUS_TRACE("MENUS: - re-adding group ", it.first, "with", group.items.size(), "item(s)");
 
-      auto menu = group.end->parent();
+      auto menu = group.menu;
       int insertIndex = menu->getChildIndex(group.end);
+      if (insertIndex < 0)
+        insertIndex = -1;
       for (auto& item : group.items) {
         menu->insertChild(++insertIndex, item);
         group.end = item;
@@ -417,10 +458,22 @@ void AppMenus::reload()
     .FirstChild("gui")
     .FirstChild("keyboard").ToElement();
 
+  // From a fresh start, load the default keys
   KeyboardShortcuts::instance()->clear();
   KeyboardShortcuts::instance()->importFile(xmlKey, KeySource::Original);
 
-  // Load user settings
+  // Load extension-defined keys
+  for (const Extension* ext : App::instance()->extensions()) {
+    if (ext->isEnabled() &&
+        ext->hasKeys()) {
+      for (const auto& kv : ext->keys()) {
+        KeyboardShortcuts::instance()->importFile(
+          kv.second, KeySource::ExtensionDefined);
+      }
+    }
+  }
+
+  // Load user-defined keys
   {
     ResourceFinder rf;
     rf.includeUserDir("user.aseprite-keys");
@@ -439,9 +492,6 @@ void AppMenus::loadScriptsSubmenu(ui::Menu* menu,
                                   const std::string& dir,
                                   const bool rootLevel)
 {
-  Command* cmd_run_script =
-    Commands::instance()->byId(CommandId::RunScript());
-
   auto files = base::list_files(dir);
   std::sort(files.begin(), files.end(),
             [](const std::string& a, const std::string& b) {
@@ -461,7 +511,7 @@ void AppMenus::loadScriptsSubmenu(ui::Menu* menu,
         params.set("filename", fullFn.c_str());
         menuitem = new AppMenuItem(
           base::get_file_title(fn).c_str(),
-          cmd_run_script,
+          CommandId::RunScript(),
           params);
       }
     }
@@ -510,8 +560,6 @@ bool AppMenus::rebuildRecentList()
     removeMenuItemFromGroup(item);
   m_recentMenuItems.clear();
 
-  Command* openFile = Commands::instance()->byId(CommandId::OpenFile());
-
   auto recent = App::instance()->recentFiles();
   base::paths files;
   files.insert(files.end(),
@@ -527,7 +575,8 @@ bool AppMenus::rebuildRecentList()
 
       std::unique_ptr<AppMenuItem> menuitem(
         new AppMenuItem(base::get_file_name(fn).c_str(),
-                        openFile, params));
+                        CommandId::OpenFile(),
+                        params));
       menuitem->setIsRecentFileItem(true);
 
       m_recentMenuItems.push_back(menuitem.get());
@@ -537,7 +586,7 @@ bool AppMenus::rebuildRecentList()
   else {
       std::unique_ptr<AppMenuItem> menuitem(
         new AppMenuItem(
-          Strings::main_menu_file_no_recent_file(), nullptr));
+          Strings::main_menu_file_no_recent_file()));
     menuitem->setIsRecentFileItem(true);
     menuitem->setEnabled(false);
 
@@ -559,14 +608,68 @@ bool AppMenus::rebuildRecentList()
   return true;
 }
 
-void AppMenus::addMenuItemIntoGroup(const std::string& groupId,
-                                    std::unique_ptr<MenuItem>&& menuItem)
+Menu* AppMenus::getAnimationMenu()
+{
+  auto menuItem =
+    dynamic_cast<MenuItem*>(m_rootMenu->findItemById("animation_menu"));
+  if (menuItem)
+    return menuItem->getSubmenu();
+  else
+    return nullptr;
+}
+
+void AppMenus::addMenuGroup(const std::string& groupId,
+                            MenuItem* menuItem)
 {
   GroupInfo& group = m_groups[groupId];
-  Widget* menu = group.end->parent();
+  ASSERT(group.menu == nullptr);
+  ASSERT(group.end == nullptr);
+  group.menu = menuItem->getSubmenu();
+  group.end = nullptr;
+}
+
+void AppMenus::removeMenuGroup(const std::string& groupId)
+{
+  auto it = m_groups.find(groupId);
+  if (it != m_groups.end()) {
+    GroupInfo& group = it->second;
+
+    ASSERT(group.items.empty()); // To remove a group, the group must be empty
+
+    if (group.menu->getOwnerMenuItem()) {
+      ui::MenuItem* item = group.menu->getOwnerMenuItem();
+      removeMenuItemFromGroup(
+        [item](Widget* i){
+          return item == i;
+        });
+    }
+    m_groups.erase(it);
+  }
+}
+
+void AppMenus::addMenuItemIntoGroup(const std::string& groupId,
+                                    std::unique_ptr<Widget>&& menuItem)
+{
+  auto it = m_groups.find(groupId);
+  if (it == m_groups.end()) {
+    LOG(ERROR, "MENU: An extension tried to add a command (%s) in a non-existent group (%s)\n",
+        menuItem->text().c_str(), groupId.c_str());
+    menuItem.release();
+    return;
+  }
+
+  GroupInfo& group = it->second;
+  Menu* menu = group.menu;
   ASSERT(menu);
-  int insertIndex = menu->getChildIndex(group.end);
-  menu->insertChild(insertIndex+1, menuItem.get());
+
+  if (group.end) {
+    int insertIndex = menu->getChildIndex(group.end);
+    ASSERT(insertIndex >= 0);
+    menu->insertChild(insertIndex+1, menuItem.get());
+  }
+  else {
+    menu->addChild(menuItem.get());
+  }
 
   group.end = menuItem.get();
   group.items.push_back(menuItem.get());
@@ -585,12 +688,7 @@ void AppMenus::removeMenuItemFromGroup(Pred pred)
         if (item == group.end)
           group.end = group.end->previousSibling();
 
-        item->parent()->removeChild(item);
-        if (auto appItem = dynamic_cast<AppMenuItem*>(item)) {
-          if (appItem)
-            appItem->disposeNative();
-        }
-        item->deferDelete();
+        destroy_menu_item(item);
 
         it = group.items.erase(it);
       }
@@ -644,10 +742,11 @@ Menu* AppMenus::loadMenuById(TiXmlHandle& handle, const char* id)
 Menu* AppMenus::convertXmlelemToMenu(TiXmlElement* elem)
 {
   Menu* menu = new Menu();
+  menu->setText(m_xmlTranslator(elem, "text"));
 
   TiXmlElement* child = elem->FirstChildElement();
   while (child) {
-    Widget* menuitem = convertXmlelemToMenuitem(child);
+    Widget* menuitem = convertXmlelemToMenuitem(child, menu);
     if (menuitem)
       menu->addChild(menuitem);
     else
@@ -660,10 +759,11 @@ Menu* AppMenus::convertXmlelemToMenu(TiXmlElement* elem)
   return menu;
 }
 
-Widget* AppMenus::convertXmlelemToMenuitem(TiXmlElement* elem)
+Widget* AppMenus::convertXmlelemToMenuitem(TiXmlElement* elem, Menu* menu)
 {
   const char* id = elem->Attribute("id");
   const char* group = elem->Attribute("group");
+  const char* standard = elem->Attribute("standard");
 
   // is it a <separator>?
   if (strcmp(elem->Value(), "separator") == 0) {
@@ -676,15 +776,17 @@ Widget* AppMenus::convertXmlelemToMenuitem(TiXmlElement* elem)
         m_recentFilesPlaceholder = item;
       }
     }
-    if (group)
+    if (group) {
+      m_groups[group].menu = menu;
       m_groups[group].end = item;
+    }
     return item;
   }
 
-  const char* command_id = elem->Attribute("command");
+  const char* commandId = elem->Attribute("command");
   Command* command =
-    command_id ? Commands::instance()->byId(command_id):
-                 nullptr;
+    (commandId ? Commands::instance()->byId(commandId):
+                 nullptr);
 
   // load params
   Params params;
@@ -703,14 +805,29 @@ Widget* AppMenus::convertXmlelemToMenuitem(TiXmlElement* elem)
 
   // Create the item
   AppMenuItem* menuitem = new AppMenuItem(m_xmlTranslator(elem, "text"),
-                                          command, params);
+                                          (command ? command->id(): ""),
+                                          params);
   if (!menuitem)
     return nullptr;
 
+  // Get menu item text from command friendly name
+  if (command && menuitem->text().empty()) {
+    command->loadParams(params);
+    menuitem->setText(command->friendlyName());
+  }
+  // If the menu item has a specific text, process its mnemonic
+  else {
+    menuitem->processMnemonicFromText();
+  }
+
   if (id) menuitem->setId(id);
-  menuitem->processMnemonicFromText();
-  if (group)
+  if (group) {
+    m_groups[group].menu = menu;
     m_groups[group].end = menuitem;
+  }
+
+  if (standard && strcmp(standard, "edit") == 0)
+    menuitem->setStandardEditMenu();
 
   // Has it a ID?
   if (id) {
@@ -753,11 +870,10 @@ void AppMenus::applyShortcutToMenuitemsWithCommand(Menu* menu,
       if (!menuitem)
         continue;
 
-      Command* mi_command = menuitem->getCommand();
+      const std::string& mi_commandId = menuitem->getCommandId();
       const Params& mi_params = menuitem->getParams();
 
-      if ((mi_command) &&
-          (base::utf8_icmp(mi_command->id(), command->id()) == 0) &&
+      if ((base::utf8_icmp(mi_commandId, command->id()) == 0) &&
           (mi_params == params)) {
         // Set the keyboard shortcut to be shown in this menu-item
         menuitem->setKey(key);
@@ -919,7 +1035,7 @@ void AppMenus::createNativeSubmenus(os::Menu* osMenu,
       if (appMenuItem &&
           appMenuItem->getCommand()) {
         native = get_native_shortcut_for_command(
-          appMenuItem->getCommand()->id().c_str(),
+          appMenuItem->getCommandId().c_str(),
           appMenuItem->getParams());
       }
 
@@ -953,6 +1069,10 @@ void AppMenus::createNativeSubmenus(os::Menu* osMenu,
       if (appMenuItem) {
         native.menuItem = osItem;
         appMenuItem->setNative(native);
+
+        // Set this menu item as the standard "Edit" item for macOS
+        if (appMenuItem->isStandardEditMenu())
+          osItem->setAsStandardEditMenuItem();
       }
 
       if (child->type() == ui::kMenuItemWidget &&

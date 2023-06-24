@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -13,7 +13,7 @@
 
 #include "app/commands/command.h"
 #include "app/commands/commands.h"
-#include "app/modules/editors.h"
+#include "app/i18n/strings.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/keyboard_shortcuts.h"
 #include "app/ui/skin/skin_theme.h"
@@ -42,13 +42,13 @@ enum AniAction {
 AniControls::AniControls(TooltipManager* tooltipManager)
   : ButtonSet(5)
 {
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
 
-  addItem(theme->parts.aniFirst());
-  addItem(theme->parts.aniPrevious());
-  addItem(theme->parts.aniPlay());
-  addItem(theme->parts.aniNext());
-  addItem(theme->parts.aniLast());
+  addItem(theme->parts.aniFirst(), "ani_button");
+  addItem(theme->parts.aniPrevious(), "ani_button");
+  addItem(theme->parts.aniPlay(), "ani_button");
+  addItem(theme->parts.aniNext(), "ani_button");
+  addItem(theme->parts.aniLast(), "ani_button");
   ItemChange.connect([this]{ onClickButton(); });
 
   setTriggerOnMouseUp(true);
@@ -61,14 +61,14 @@ AniControls::AniControls(TooltipManager* tooltipManager)
 
   InitTheme.connect(
     [this]{
-      SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+      auto theme = SkinTheme::get(this);
       setBgColor(theme->colors.workspace());
     });
 }
 
 void AniControls::updateUsingEditor(Editor* editor)
 {
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   getItem(ACTION_PLAY)->setIcon(
     (editor && editor->isPlaying() ?
       theme->parts.aniStop():
@@ -82,8 +82,10 @@ void AniControls::onClickButton()
 
   Command* cmd = Commands::instance()->byId(getCommandId(item));
   if (cmd) {
+    auto editor = Editor::activeEditor();
+
     UIContext::instance()->executeCommandFromMenuOrShortcut(cmd);
-    updateUsingEditor(current_editor);
+    updateUsingEditor(editor);
   }
 }
 
@@ -91,10 +93,10 @@ void AniControls::onRightClick(Item* item)
 {
   ButtonSet::onRightClick(item);
 
-  if (item == getItem(ACTION_PLAY) && current_editor)
-    current_editor->showAnimationSpeedMultiplierPopup(
-      Preferences::instance().editor.playOnce,
-      Preferences::instance().editor.playAll, true);
+  auto editor = Editor::activeEditor();
+  if (item == getItem(ACTION_PLAY) && editor) {
+    editor->showAnimationSpeedMultiplierPopup();
+  }
 }
 
 const char* AniControls::getCommandId(int index) const
@@ -124,12 +126,12 @@ std::string AniControls::getTooltipFor(int index) const
                                                    Params(),
                                                    KeyContext::Normal);
     if (key && !key->accels().empty()) {
-      tooltip += "\n\nShortcut: ";
+      tooltip += "\n\n" + Strings::ani_controls_shortcut() + " ";
       tooltip += key->accels().front().toString();
     }
 
     if (index == ACTION_PLAY) {
-      tooltip += "\n\nRight-click: Show playback options";
+      tooltip += "\n\n" + Strings::ani_controls_right_click();
     }
   }
 

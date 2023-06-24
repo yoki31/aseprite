@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2016-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -18,6 +18,7 @@ namespace doc {
   class Layer;
   class SelectedFrames;
   class SelectedLayers;
+  class Slice;
   class Sprite;
   class Tag;
 }
@@ -30,10 +31,22 @@ namespace app {
   class RestoreVisibleLayers;
   class Site;
 
+  extern const char* kWholeCanvas;
   extern const char* kAllLayers;
   extern const char* kAllFrames;
+  extern const char* kSelectedCanvas;
   extern const char* kSelectedLayers;
   extern const char* kSelectedFrames;
+
+  class SliceListItem : public ui::ListItem {
+  public:
+    SliceListItem(doc::Slice* slice);
+    doc::Slice* slice() const { return m_slice; }
+  private:
+    doc::Slice* m_slice;
+  };
+
+  constexpr const int kLayersComboboxExtraInitialItems = 2;
 
   class LayerListItem : public ui::ListItem {
   public:
@@ -52,12 +65,14 @@ namespace app {
     doc::Tag* m_tag;
   };
 
-  void fill_layers_combobox(const doc::Sprite* sprite, ui::ComboBox* layers, const std::string& defLayer);
+  void fill_area_combobox(const doc::Sprite* sprite, ui::ComboBox* area, const std::string& defArea);
+  void fill_layers_combobox(const doc::Sprite* sprite, ui::ComboBox* layers, const std::string& defLayer, const int defLayerIndex);
   void fill_frames_combobox(const doc::Sprite* sprite, ui::ComboBox* frames, const std::string& defFrame);
   void fill_anidir_combobox(ui::ComboBox* anidir, doc::AniDir defAnidir);
 
   void calculate_visible_layers(const Site& site,
                                 const std::string& layersValue,
+                                const int layersIndex,
                                 RestoreVisibleLayers& layersVisibility);
 
   doc::Tag* calculate_selected_frames(const Site& site,

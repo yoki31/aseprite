@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -71,7 +71,7 @@ unsigned int current_file_system_version = 0;
 #endif
 
 // a position in the file-system
-class FileItem : public IFileItem {
+class FileItem final : public IFileItem {
 public:
   // TODO make all these fields private
   std::string m_keyname;
@@ -121,6 +121,13 @@ public:
   double getThumbnailProgress() override { return m_thumbnailProgress; }
   void setThumbnailProgress(double progress) override {
     m_thumbnailProgress = progress;
+  }
+
+  bool needThumbnail() const override {
+    return
+      !isBrowsable() &&
+      m_thumbnail == nullptr &&
+      m_thumbnailProgress < 1.0;
   }
 
   os::SurfaceRef getThumbnail() override;
@@ -593,6 +600,8 @@ os::SurfaceRef FileItem::getThumbnail()
 
 void FileItem::setThumbnail(const os::SurfaceRef& newThumbnail)
 {
+  m_thumbnailProgress = 1.0;
+
   if (newThumbnail)
     newThumbnail->ref();
   auto old = m_thumbnail.exchange(newThumbnail.get());
@@ -952,7 +961,7 @@ static FileItem* get_fileitem_by_fullpidl(LPITEMIDLIST fullpidl, bool create_if_
     return nullptr;
 
   // new file-item
-  FileItem* fileitem = new FileItem(nullptr);
+  auto fileitem = std::make_unique<FileItem>(nullptr);
   fileitem->m_fullpidl = clone_pidl(fullpidl);
 
   {
@@ -964,19 +973,26 @@ static FileItem* get_fileitem_by_fullpidl(LPITEMIDLIST fullpidl, bool create_if_
 
     free_pidl(parent_fullpidl);
 
+    // The parent folder is sometimes deleted for some reasons. In
+    // that case, m_parent becomes nullptr, so we cannot use it
+    // anymore. Here we just return nullptr to indicate that the item
+    // doesn't exist anymore.
+    if (fileitem->m_parent == nullptr)
+      return nullptr;
+
     // Get specific pidl attributes
     if (fileitem->m_pidl &&
         fileitem->m_parent) {
-      attrib = get_pidl_attrib(fileitem, attrib);
+      attrib = get_pidl_attrib(fileitem.get(), attrib);
     }
   }
 
-  update_by_pidl(fileitem, attrib);
-  put_fileitem(fileitem);
+  update_by_pidl(fileitem.get(), attrib);
+  put_fileitem(fileitem.get());
 
   //LOG("FS: fileitem %p created %s with parent %p\n", fileitem, fileitem->keyname.c_str(), fileitem->parent);
 
-  return fileitem;
+  return fileitem.release();
 }
 
 // Inserts the fileitem in the hash map of items.

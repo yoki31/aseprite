@@ -12,12 +12,13 @@
 #include "doc/algorithm/shift_image.h"
 
 #include "base/pi.h"
-#include "gfx/rect.h"
 #include "doc/algorithm/shrink_bounds.h"
 #include "doc/cel.h"
 #include "doc/image.h"
+#include "doc/layer.h"
 #include "doc/mask.h"
 #include "doc/primitives.h"
+#include "gfx/rect.h"
 
 #include <vector>
 
@@ -90,23 +91,38 @@ ImageRef shift_image_with_mask(const Cel* cel,
   ImageRef imageToShift(Image::create(compImage->pixelFormat(), maskedBounds.w, maskedBounds.h));
   imageToShift->copy(compImage.get(), gfx::Clip(0, 0, maskedBounds));
 
-  // Shiftting the masked area of the COMPOUND IMAGE (compImage).
-  int initialX = maskedBounds.x;
-  int initialY = maskedBounds.y;
-  int finalX = maskedBounds.x2();
-  int finalY = maskedBounds.y2();
-  for (int y=initialY; y<finalY; ++y) {
-    for (int x=initialX; x<finalX; ++x) {
-        put_pixel(compImage.get(),
-                  initialX + (maskedBounds.w + dx + x-initialX) % maskedBounds.w,
-                  initialY + (maskedBounds.h + dy + y-initialY) % maskedBounds.h,
-                  get_pixel(imageToShift.get(), x - initialX, y - initialY));
+  // Shifting the masked area of the COMPOUND IMAGE (compImage).
+  const int xInitial = maskedBounds.x;
+  const int yInitial = maskedBounds.y;
+  const int wMask = maskedBounds.w;
+  const int hMask = maskedBounds.h;
+  for (int y=0; y<hMask; ++y) {
+    for (int x=0; x<wMask; ++x) {
+      // Use floor modulo (Euclidean remainder).
+      // Shifts are broken out and stored in separate variables
+      // to make them easier to recognize and change in the event
+      // that rem_eucl is implemented formally in the future.
+      const int xShift = ((dx + x) % wMask + wMask) % wMask;
+      const int yShift = ((dy + y) % hMask + hMask) % hMask;
+
+      put_pixel(
+        compImage.get(),
+        xInitial + xShift,
+        yInitial + yShift,
+        get_pixel(imageToShift.get(), x, y));
     }
   }
 
   // Bounds and Image shrinking (we have to fit compound image (compImage) and bounds (compCelBounds))
   gfx::Rect newBounds = compImage->bounds();
-  if (algorithm::shrink_bounds(compImage.get(), newBounds, compImage->maskColor())) {
+  if (algorithm::shrink_bounds(
+        compImage.get(),
+        compImage->maskColor(),
+        // TODO adding the layer for tilemaps (so the program doesn't
+        //      crash), but anyway it the Shift algorithm is not
+        //      working yet for tilemaps
+        cel->layer(),
+        newBounds)) {
     compCelBounds.offset(newBounds.x, newBounds.y);
     compCelBounds.setSize(newBounds.size());
   }

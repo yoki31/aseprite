@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -12,9 +12,10 @@
 #include "app/crash/read_document.h"
 
 #include "app/console.h"
+#include "app/crash/doc_format.h"
 #include "app/crash/internals.h"
+#include "app/crash/log.h"
 #include "app/doc.h"
-#include "base/clamp.h"
 #include "base/convert_to.h"
 #include "base/exception.h"
 #include "base/fs.h"
@@ -28,6 +29,7 @@
 #include "doc/frame.h"
 #include "doc/image_io.h"
 #include "doc/layer.h"
+#include "doc/layer_tilemap.h"
 #include "doc/palette.h"
 #include "doc/palette_io.h"
 #include "doc/slice.h"
@@ -37,7 +39,11 @@
 #include "doc/subobjects_io.h"
 #include "doc/tag.h"
 #include "doc/tag_io.h"
+#include "doc/tileset.h"
+#include "doc/tileset_io.h"
+#include "doc/tilesets.h"
 #include "doc/user_data_io.h"
+#include "doc/util.h"
 #include "fixmath/fixmath.h"
 
 #include <fstream>
@@ -56,7 +62,8 @@ class Reader : public SubObjectsIO {
 public:
   Reader(const std::string& dir,
          base::task_token* t)
-    : m_sprite(nullptr)
+    : m_docFormatVer(DOC_FORMAT_VERSION_0)
+    , m_sprite(nullptr)
     , m_dir(dir)
     , m_docId(0)
     , m_docVersions(nullptr)
@@ -146,7 +153,7 @@ private:
       if (!ver)
         continue;
 
-      TRACE("RECO: Restoring %s #%d v%d\n", prefix, id, ver);
+      RECO_TRACE("RECO: Restoring %s #%d v%d\n", prefix, id, ver);
 
       std::string fn = prefix;
       fn.push_back('-');
@@ -160,11 +167,11 @@ private:
         obj = (this->*readMember)(s);
 
       if (obj) {
-        TRACE("RECO: %s #%d v%d restored successfully\n", prefix, id, ver);
+        RECO_TRACE("RECO: %s #%d v%d restored successfully\n", prefix, id, ver);
         return obj;
       }
       else {
-        TRACE("RECO: %s #%d v%d was not restored\n", prefix, id, ver);
+        RECO_TRACE("RECO: %s #%d v%d was not restored\n", prefix, id, ver);
       }
     }
 
@@ -178,6 +185,10 @@ private:
   Doc* readDocument(std::ifstream& s) {
     ObjectId sprId = read32(s);
     std::string filename = read_string(s);
+    m_docFormatVer = read16(s);
+    if (s.eof()) m_docFormatVer = DOC_FORMAT_VERSION_0;
+
+    RECO_TRACE("RECO: internal format version=%d\n", m_docFormatVer);
 
     // Load DocumentInfo only
     if (m_loadInfo) {
@@ -199,6 +210,7 @@ private:
   }
 
   Sprite* readSprite(std::ifstream& s) {
+    // Header
     ColorMode mode = (ColorMode)read8(s);
     int w = read16(s);
     int h = read16(s);
@@ -240,6 +252,21 @@ private:
     }
     else {
       Console().printf("Invalid number of frames #%d\n", nframes);
+    }
+
+    // IDs of all tilesets
+    if (m_docFormatVer >= DOC_FORMAT_VERSION_1) {
+      int ntilesets = read32(s);
+      if (ntilesets > 0 && ntilesets < 0xffffff) {
+        for (int i=0; i<ntilesets; ++i) {
+          ObjectId tilesetId = read32(s);
+          Tileset* tileset = loadObject<Tileset*>("tset", tilesetId, &Reader::readTileset);
+          if (tileset)
+            spr->tilesets()->add(tileset);
+          else
+            spr->tilesets()->add(nullptr);
+        }
+      }
     }
 
     // Read layers
@@ -308,9 +335,10 @@ private:
           return nullptr;
 
         ObjectId palId = read32(s);
-        Palette* pal = loadObject<Palette*>("pal", palId, &Reader::readPalette);
+        std::unique_ptr<Palette> pal(
+          loadObject<Palette*>("pal", palId, &Reader::readPalette));
         if (pal)
-          spr->setPalette(pal, true);
+          spr->setPalette(pal.get(), true);
       }
     }
 
@@ -356,6 +384,13 @@ private:
         spr->setGridBounds(gridBounds);
     }
 
+    // Read Sprite User Data
+    if (!s.eof()) {
+      UserData userData = read_user_data(s, m_docFormatVer);
+      if (!userData.isEmpty())
+        spr->setUserData(userData);
+    }
+
     return spr.release();
   }
 
@@ -395,14 +430,27 @@ private:
     LayerFlags flags = (LayerFlags)read32(s);
     ObjectType type = (ObjectType)read16(s);
     ASSERT(type == ObjectType::LayerImage ||
-           type == ObjectType::LayerGroup);
+           type == ObjectType::LayerGroup ||
+           type == ObjectType::LayerTilemap);
 
     std::string name = read_string(s);
     std::unique_ptr<Layer> lay;
 
     switch (type) {
-      case ObjectType::LayerImage: {
-        lay.reset(new LayerImage(m_sprite));
+
+      case ObjectType::LayerImage:
+      case ObjectType::LayerTilemap: {
+        switch (type) {
+          case ObjectType::LayerImage:
+            lay.reset(new LayerImage(m_sprite));
+            break;
+          case ObjectType::LayerTilemap: {
+            tileset_index tilesetIndex = read32(s);
+            lay.reset(new LayerTilemap(m_sprite, tilesetIndex));
+            break;
+          }
+        }
+
         lay->setName(name);
         lay->setFlags(flags);
 
@@ -436,7 +484,7 @@ private:
     }
 
     if (lay) {
-      UserData userData = read_user_data(s);
+      UserData userData = read_user_data(s, m_docFormatVer);
       lay->setUserData(userData);
       return lay.release();
     }
@@ -449,7 +497,7 @@ private:
   }
 
   CelData* readCelData(std::ifstream& s) {
-    return read_celdata(s, this, false);
+    return read_celdata(s, this, false, m_docFormatVer);
   }
 
   Image* readImage(std::ifstream& s) {
@@ -460,8 +508,16 @@ private:
     return read_palette(s);
   }
 
+  Tileset* readTileset(std::ifstream& s) {
+    uint32_t tilesetVer;
+    Tileset* tileset = read_tileset(s, m_sprite, false, &tilesetVer, m_docFormatVer);
+    if (tileset && tilesetVer < TILESET_VER1)
+      m_updateOldTilemapWithTileset.insert(tileset->id());
+    return tileset;
+  }
+
   Tag* readTag(std::ifstream& s) {
-    return read_tag(s, false);
+    return read_tag(s, false, m_docFormatVer);
   }
 
   Slice* readSlice(std::ifstream& s) {
@@ -489,6 +545,25 @@ private:
         }
       }
     }
+
+    // Fix tilemaps using old tilesets
+    if (!m_updateOldTilemapWithTileset.empty()) {
+      for (Tileset* tileset : *spr->tilesets()) {
+        if (!tileset)
+          continue;
+
+        if (m_updateOldTilemapWithTileset.find(tileset->id()) == m_updateOldTilemapWithTileset.end())
+          continue;
+
+        for (Cel* cel : spr->uniqueCels()) {
+          if (cel->image()->pixelFormat() == IMAGE_TILEMAP &&
+              static_cast<LayerTilemap*>(cel->layer())->tileset() == tileset) {
+            doc::fix_old_tilemap(cel->image(), tileset,
+                                 tile_i_mask, tile_f_mask);
+          }
+        }
+      }
+    }
   }
 
   bool canceled() const {
@@ -498,6 +573,7 @@ private:
       return false;
   }
 
+  int m_docFormatVer;
   Sprite* m_sprite;    // Used to pass the sprite in LayerImage() ctor
   std::string m_dir;
   ObjectVersion m_docId;
@@ -507,6 +583,9 @@ private:
   std::vector<std::pair<ObjectId, ObjectId> > m_celsToLoad;
   std::map<ObjectId, ImageRef> m_images;
   std::map<ObjectId, CelDataRef> m_celdatas;
+  // Each ObjectId is a tileset ID that didn't contain the empty tile
+  // as the first tile (this was an old format used in internal betas)
+  std::set<ObjectId> m_updateOldTilemapWithTileset;
   base::task_token* m_taskToken;
 };
 
@@ -539,8 +618,8 @@ Doc* read_document_with_raw_images(const std::string& dir,
     info.height = 256;
     info.filename = "Unknown";
   }
-  info.width = base::clamp(info.width, 1, 99999);
-  info.height = base::clamp(info.height, 1, 99999);
+  info.width = std::clamp(info.width, 1, 99999);
+  info.height = std::clamp(info.height, 1, 99999);
   Sprite* spr = new Sprite(ImageSpec(info.mode, info.width, info.height), 256);
 
   // Load each image as a new frame

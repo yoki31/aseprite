@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -14,6 +14,7 @@
 #include "app/tools/active_tool_observer.h"
 #include "app/ui/doc_observer_widget.h"
 #include "base/time.h"
+#include "doc/tile.h"
 #include "ui/base.h"
 #include "ui/box.h"
 
@@ -60,7 +61,10 @@ namespace app {
 
     bool setStatusText(int msecs, const std::string& text);
     void showTip(int msecs, const std::string& msg);
-    void showColor(int msecs, const char* text, const Color& color);
+    void showColor(int msecs, const Color& color,
+                   const std::string& text = std::string());
+    void showTile(int msecs, doc::tile_t tile,
+                  const std::string& text = std::string());
     void showTool(int msecs, tools::Tool* tool);
     void showSnapToGridWarning(bool state);
 

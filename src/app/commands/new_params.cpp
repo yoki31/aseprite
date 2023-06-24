@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -18,7 +18,9 @@
 #include "base/split_string.h"
 #include "base/string.h"
 #include "doc/algorithm/resize_image.h"
+#include "doc/anidir.h"
 #include "doc/color_mode.h"
+#include "doc/rgbmap_algorithm.h"
 #include "filters/color_curve.h"
 #include "filters/hue_saturation_filter.h"
 #include "filters/outline_filter.h"
@@ -145,6 +147,12 @@ void Param<doc::ColorMode>::fromString(const std::string& value)
 }
 
 template<>
+void Param<doc::AniDir>::fromString(const std::string& value)
+{
+  setValue(convert_string_to_anidir(value));
+}
+
+template<>
 void Param<app::Color>::fromString(const std::string& value)
 {
   setValue(app::Color::fromString(value));
@@ -220,6 +228,17 @@ template<>
 void Param<tools::InkType>::fromString(const std::string& value)
 {
   setValue(tools::string_id_to_ink_type(value));
+}
+
+template<>
+void Param<doc::RgbMapAlgorithm>::fromString(const std::string& value)
+{
+  if (base::utf8_icmp(value, "octree") == 0)
+    setValue(doc::RgbMapAlgorithm::OCTREE);
+  else if (base::utf8_icmp(value, "rgb5a3") == 0)
+    setValue(doc::RgbMapAlgorithm::RGB5A3);
+  else
+    setValue(doc::RgbMapAlgorithm::DEFAULT);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -304,6 +323,15 @@ void Param<doc::ColorMode>::fromLua(lua_State* L, int index)
 }
 
 template<>
+void Param<doc::AniDir>::fromLua(lua_State* L, int index)
+{
+  if (lua_type(L, index) == LUA_TSTRING)
+    fromString(lua_tostring(L, index));
+  else
+    setValue((doc::AniDir)lua_tointeger(L, index));
+}
+
+template<>
 void Param<app::Color>::fromLua(lua_State* L, int index)
 {
   setValue(script::convert_args_into_color(L, index));
@@ -366,6 +394,15 @@ template<>
 void Param<tools::InkType>::fromLua(lua_State* L, int index)
 {
   setValue(script::get_value_from_lua<tools::InkType>(L, index));
+}
+
+template<>
+void Param<doc::RgbMapAlgorithm>::fromLua(lua_State* L, int index)
+{
+  if (lua_type(L, index) == LUA_TSTRING)
+    fromString(lua_tostring(L, index));
+  else
+    setValue((doc::RgbMapAlgorithm)lua_tointeger(L, index));
 }
 
 void CommandWithNewParamsBase::loadParamsFromLuaTable(lua_State* L, int index)

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -12,6 +12,7 @@
 #include "app/cmd/assign_color_profile.h"
 #include "app/cmd/convert_color_profile.h"
 #include "app/cmd/set_pixel_ratio.h"
+#include "app/cmd/set_user_data.h"
 #include "app/color.h"
 #include "app/commands/command.h"
 #include "app/context_access.h"
@@ -21,11 +22,13 @@
 #include "app/pref/preferences.h"
 #include "app/tx.h"
 #include "app/ui/color_button.h"
+#include "app/ui/user_data_view.h"
 #include "app/util/pixel_ratio.h"
 #include "base/mem_utils.h"
 #include "doc/image.h"
 #include "doc/palette.h"
 #include "doc/sprite.h"
+#include "doc/user_data.h"
 #include "fmt/format.h"
 #include "os/color_space.h"
 #include "os/system.h"
@@ -36,6 +39,37 @@
 namespace app {
 
 using namespace ui;
+
+class SpritePropertiesWindow : public app::gen::SpriteProperties {
+public:
+  SpritePropertiesWindow(Sprite* sprite)
+    : SpriteProperties()
+    , m_sprite(sprite)
+    , m_userDataView(Preferences::instance().sprite.userDataVisibility)
+  {
+    userData()->Click.connect([this]{ onToggleUserData(); });
+
+    m_userDataView.configureAndSet(m_sprite->userData(),
+                                   propertiesGrid());
+
+    remapWindow();
+    centerWindow();
+    load_window_pos(this, "SpriteProperties");
+    manager()->invalidate();
+  }
+
+  const UserData& getUserData() const { return m_userDataView.userData(); }
+
+private:
+  void onToggleUserData() {
+    m_userDataView.toggleVisibility();
+    remapWindow();
+    manager()->invalidate();
+  }
+
+  Sprite* m_sprite;
+  UserDataView m_userDataView;
+};
 
 class SpritePropertiesCommand : public Command {
 public:
@@ -67,7 +101,8 @@ void SpritePropertiesCommand::onExecute(Context* context)
   os::instance()->listColorSpaces(colorSpaces);
 
   // Load the window widget
-  app::gen::SpriteProperties window;
+  SpritePropertiesWindow window(context->activeDocument()->sprite());
+
   int selectedColorProfile = -1;
 
   auto updateButtons =
@@ -87,18 +122,18 @@ void SpritePropertiesCommand::onExecute(Context* context)
     // Update widgets values
     switch (sprite->pixelFormat()) {
       case IMAGE_RGB:
-        imgtype_text = "RGB";
+        imgtype_text = Strings::sprite_properties_rgb();
         break;
       case IMAGE_GRAYSCALE:
-        imgtype_text = "Grayscale";
+        imgtype_text = Strings::sprite_properties_grayscale();
         break;
       case IMAGE_INDEXED:
-        imgtype_text = fmt::format("Indexed ({0} colors)",
+        imgtype_text = fmt::format(Strings::sprite_properties_indexed_color(),
                                    sprite->palette(0)->size());
         break;
       default:
         ASSERT(false);
-        imgtype_text = "Unknown";
+        imgtype_text = Strings::general_unknown();
         break;
     }
 
@@ -134,7 +169,8 @@ void SpritePropertiesCommand::onExecute(Context* context)
         LEFT);
     }
     else {
-      window.transparentColorPlaceholder()->addChild(new Label("(only for indexed images)"));
+      window.transparentColorPlaceholder()->addChild(
+        new Label(Strings::sprite_properties_indexed_image_only()));
     }
 
     // Pixel ratio
@@ -165,12 +201,12 @@ void SpritePropertiesCommand::onExecute(Context* context)
     window.colorProfile()->Change.connect(updateButtons);
 
     window.assignColorProfile()->Click.connect(
-      [&](Event&){
+      [&](){
         selectedColorProfile = window.colorProfile()->getSelectedItemIndex();
 
         ContextWriter writer(context);
         Sprite* sprite(writer.sprite());
-        Tx tx(writer.context(), "Assign Color Profile");
+        Tx tx(writer.context(), Strings::sprite_properties_assign_color_profile());
         tx(new cmd::AssignColorProfile(
              sprite, colorSpaces[selectedColorProfile]->gfxColorSpace()));
         tx.commit();
@@ -178,12 +214,12 @@ void SpritePropertiesCommand::onExecute(Context* context)
         updateButtons();
       });
     window.convertColorProfile()->Click.connect(
-      [&](Event&){
+      [&](){
         selectedColorProfile = window.colorProfile()->getSelectedItemIndex();
 
         ContextWriter writer(context);
         Sprite* sprite(writer.sprite());
-        Tx tx(writer.context(), "Convert Color Profile");
+        Tx tx(writer.context(), Strings::sprite_properties_convert_color_profile());
         tx(new cmd::ConvertColorProfile(
              sprite, colorSpaces[selectedColorProfile]->gfxColorSpace()));
         tx.commit();
@@ -208,9 +244,12 @@ void SpritePropertiesCommand::onExecute(Context* context)
     PixelRatio pixelRatio =
       base::convert_to<PixelRatio>(window.pixelRatio()->getValue());
 
+    const UserData newUserData = window.getUserData();
+
     if (index != sprite->transparentColor() ||
-        pixelRatio != sprite->pixelRatio()) {
-      Tx tx(writer.context(), "Change Sprite Properties");
+        pixelRatio != sprite->pixelRatio() ||
+        newUserData != sprite->userData()) {
+      Tx tx(writer.context(), Strings::sprite_properties_change_sprite_props());
       DocApi api = writer.document()->getApi(tx);
 
       if (index != sprite->transparentColor())
@@ -218,6 +257,9 @@ void SpritePropertiesCommand::onExecute(Context* context)
 
       if (pixelRatio != sprite->pixelRatio())
         tx(new cmd::SetPixelRatio(sprite, pixelRatio));
+
+      if (newUserData != sprite->userData())
+        tx(new cmd::SetUserData(sprite, newUserData, static_cast<Doc*>(sprite->document())));
 
       tx.commit();
 

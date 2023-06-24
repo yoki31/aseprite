@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2018  David Capello
 //
 // This program is distributed under the terms of
@@ -17,7 +17,6 @@
 #include "app/shade.h"
 #include "app/ui/color_bar.h"
 #include "app/ui/skin/skin_theme.h"
-#include "base/clamp.h"
 #include "doc/color_mode.h"
 #include "doc/palette.h"
 #include "doc/palette_picks.h"
@@ -27,8 +26,8 @@
 #include "ui/paint_event.h"
 #include "ui/size_hint_event.h"
 #include "ui/system.h"
-#include <algorithm>
 
+#include <algorithm>
 
 namespace app {
 
@@ -100,7 +99,7 @@ void ColorShades::onInitTheme(ui::InitThemeEvent& ev)
 {
   Widget::onInitTheme(ev);
 
-  auto theme = skin::SkinTheme::instance();
+  auto theme = skin::SkinTheme::get(this);
 
   switch (m_click) {
     case ClickEntries:
@@ -160,10 +159,12 @@ bool ColorShades::onProcessMessage(ui::Message* msg)
       break;
 
     case ui::kMouseUpMessage: {
+      auto button = static_cast<ui::MouseMessage*>(msg)->button();
+
       if (m_click == ClickWholeShade) {
         setSelected(true);
 
-        ClickEvent ev(static_cast<ui::MouseMessage*>(msg)->button());
+        ClickEvent ev(button);
         Click(ev);
 
         closeWindow();
@@ -180,9 +181,18 @@ bool ColorShades::onProcessMessage(ui::Message* msg)
         m_dragIndex = -1;
         invalidate();
 
+        ClickEvent ev(button);
+        Click(ev);
+
         // Relayout the context bar if we have removed an entry.
-        if (m_hotIndex < 0)
+        //
+        // TODO it looks like this should be handled in some kind of
+        //      Change() event in the ColorBar
+        if (m_hotIndex < 0 &&
+            parent() &&
+            parent()->parent()) {
           parent()->parent()->layout();
+        }
       }
 
       if (hasCapture())
@@ -202,7 +212,7 @@ bool ColorShades::onProcessMessage(ui::Message* msg)
         int count = std::max(1, size());
         int boxWidth = std::max(1, bounds.w / count);
         hot = (mousePos.x - bounds.x) / boxWidth;
-        hot = base::clamp(hot, 0, count-1);
+        hot = std::clamp(hot, 0, count-1);
       }
 
       if (m_hotIndex != hot) {
@@ -236,7 +246,7 @@ void ColorShades::onSizeHint(ui::SizeHintEvent& ev)
 
 void ColorShades::onPaint(ui::PaintEvent& ev)
 {
-  auto theme = skin::SkinTheme::instance();
+  auto theme = skin::SkinTheme::get(this);
   ui::Graphics* g = ev.graphics();
   gfx::Rect bounds = clientBounds();
 

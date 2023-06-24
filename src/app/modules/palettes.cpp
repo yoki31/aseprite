@@ -1,4 +1,5 @@
 // Aseprite
+// Copyright (C) 2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -51,7 +52,7 @@ void load_default_palette()
   // If there is no palette in command line, we use the default one.
   std::string palFile = defaultPalName;
   if (base::is_file(palFile)) {
-    pal.reset(load_palette(palFile.c_str()));
+    pal = load_palette(palFile.c_str());
   }
   else {
     // Migrate old default.gpl to default.ase format
@@ -59,7 +60,7 @@ void load_default_palette()
       get_default_palette_preset_name(), ".gpl");
 
     if (base::is_file(palFile)) {
-      pal.reset(load_palette(palFile.c_str()));
+      pal = load_palette(palFile.c_str());
 
       // Remove duplicate black entries at the end (as old palettes
       // contains 256 colors)
@@ -103,13 +104,13 @@ void load_default_palette()
       if (path.empty())
         path = App::instance()->extensions().palettePath("VGA 13h");
       if (!path.empty())
-        pal.reset(load_palette(path.c_str()));
+        pal = load_palette(path.c_str());
     }
 
     // Save default.ase file
     if (pal) {
       palFile = defaultPalName;
-      save_palette(palFile.c_str(), pal.get(), 0);
+      save_palette(palFile.c_str(), pal.get(), 0, nullptr);
     }
   }
 
@@ -119,6 +120,9 @@ void load_default_palette()
   set_current_palette(nullptr, true);
 }
 
+// TODO This palette isn't synced with the current sprite palette when
+//      ENABLE_UI=0 and we are running scripts, we should remove this
+//      function and use the active Site palette.
 Palette* get_current_palette()
 {
   return ase_current_palette;

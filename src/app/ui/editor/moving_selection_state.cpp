@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2017-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -144,8 +144,9 @@ bool MovingSelectionState::onMouseMove(Editor* editor, MouseMessage* msg)
 
 bool MovingSelectionState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
 {
+  auto theme = skin::SkinTheme::get(editor);
   editor->showMouseCursor(
-    kCustomCursor, skin::SkinTheme::instance()->cursors.moveSelection());
+    kCustomCursor, theme->cursors.moveSelection());
   return true;
 }
 
@@ -156,7 +157,9 @@ bool MovingSelectionState::onUpdateStatusBar(Editor* editor)
   StatusBar::instance()->setStatusText(
     100,
     fmt::format(
-      ":pos: {} {} :size: {:3d} {:3d} :offset: {} {}",
+      ":pos: {} {}"
+      " :size: {} {}"
+      " :delta: {} {}",
       bounds.x, bounds.y,
       bounds.w, bounds.h,
       m_delta.x, m_delta.y));

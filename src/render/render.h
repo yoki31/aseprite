@@ -1,5 +1,5 @@
 // Aseprite Render Library
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (c) 2019-2023 Igara Studio S.A.
 // Copyright (c) 2001-2018 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -18,7 +18,7 @@
 #include "gfx/clip.h"
 #include "gfx/point.h"
 #include "gfx/size.h"
-#include "render/bg_type.h"
+#include "render/bg_options.h"
 #include "render/extra_type.h"
 #include "render/onionskin_options.h"
 #include "render/projection.h"
@@ -28,7 +28,9 @@ namespace doc {
   class Image;
   class Layer;
   class Palette;
+  class RenderPlan;
   class Sprite;
+  class Tileset;
 }
 
 namespace render {
@@ -56,17 +58,8 @@ namespace render {
     void setRefLayersVisiblity(const bool visible);
     void setNonactiveLayersOpacity(const int opacity);
     void setNewBlend(const bool newBlend);
-
-    // Viewport configuration
     void setProjection(const Projection& projection);
-
-    // Background configuration
-    void setBgType(BgType type);
-    void setBgZoom(bool state);
-    void setBgColor1(color_t color);
-    void setBgColor2(color_t color);
-    void setBgCheckedSize(const gfx::Size& size);
-
+    void setBgOptions(const BgOptions& bg);
     void setSelectedLayer(const Layer* layer);
 
     // Sets the preview image. This preview image is an alternative
@@ -74,6 +67,7 @@ namespace render {
     void setPreviewImage(const Layer* layer,
                          const frame_t frame,
                          const Image* image,
+                         const Tileset* tileset,
                          const gfx::Point& pos,
                          const BlendMode blendMode);
     void removePreviewImage();
@@ -117,7 +111,7 @@ namespace render {
       const gfx::ClipF& area);
 
     // Extra functions
-    void renderCheckedBackground(
+    void renderCheckeredBackground(
       Image* image,
       const gfx::Clip& area);
 
@@ -132,6 +126,7 @@ namespace render {
 
     void renderCel(
       Image* dst_image,
+      const Cel* cel,
       const Sprite* sprite,
       const Image* cel_image,
       const Layer* cel_layer,
@@ -164,20 +159,21 @@ namespace render {
       const frame_t frame,
       const CompositeImageFunc compositeImage);
 
-    void renderLayer(
-      const Layer* layer,
+    void renderPlan(
+      doc::RenderPlan& plan,
       Image* image,
       const gfx::Clip& area,
       const frame_t frame,
       const CompositeImageFunc compositeImage,
       const bool render_background,
       const bool render_transparent,
-      const BlendMode blendMode,
-      bool isSelected);
+      const BlendMode blendMode);
 
     void renderCel(
       Image* dst_image,
+      const Cel* cel,
       const Image* cel_image,
+      const Layer* cel_layer,
       const Palette* pal,
       const gfx::RectF& celBounds,
       const gfx::Clip& area,
@@ -200,6 +196,8 @@ namespace render {
       const PixelFormat srcFormat,
       const Layer* layer);
 
+    bool checkIfWeShouldUsePreview(const Cel* cel) const;
+
     int m_flags;
     int m_nonactiveLayersOpacity;
     const Sprite* m_sprite;
@@ -211,16 +209,13 @@ namespace render {
     const Image* m_extraImage;
     BlendMode m_extraBlendMode;
     bool m_newBlendMethod;
-    BgType m_bgType;
-    bool m_bgZoom;
-    color_t m_bgColor1;
-    color_t m_bgColor2;
-    gfx::Size m_bgCheckedSize;
+    BgOptions m_bg;
     int m_globalOpacity;
     const Layer* m_selectedLayerForOpacity;
     const Layer* m_selectedLayer;
     frame_t m_selectedFrame;
     const Image* m_previewImage;
+    const Tileset* m_previewTileset;
     gfx::Point m_previewPos;
     BlendMode m_previewBlendMode;
     OnionskinOptions m_onionskin;

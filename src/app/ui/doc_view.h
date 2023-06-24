@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -55,9 +55,14 @@ namespace app {
 
     bool isPreview() { return m_type == Preview; }
 
+    // Preferred timeline scroll
+    const gfx::Point& timelineScroll() { return m_timelineScroll; }
+    void setTimelineScroll(const gfx::Point& pt) { m_timelineScroll = pt; }
+
     // TabView implementation
     std::string getTabText() override;
     TabIcon getTabIcon() override;
+    gfx::Color getTabColor() override;
 
     // WorkspaceView implementation
     ui::Widget* getContentWidget() override { return this; }
@@ -81,6 +86,7 @@ namespace app {
     void onAfterRemoveCel(DocEvent& ev) override;
     void onTotalFramesChanged(DocEvent& ev) override;
     void onLayerRestacked(DocEvent& ev) override;
+    void onTilesetChanged(DocEvent& ev) override;
 
     // InputChainElement impl
     void onNewInputPriority(InputChainElement* element,
@@ -104,6 +110,7 @@ namespace app {
     ui::View* m_view;
     DocViewPreviewDelegate* m_previewDelegate;
     Editor* m_editor;
+    gfx::Point m_timelineScroll;
   };
 
 } // namespace app

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -23,7 +23,7 @@
 #include "app/file/format_options.h"
 #include "app/flatten.h"
 #include "app/pref/preferences.h"
-#include "app/util/create_cel_copy.h"
+#include "app/util/cel_ops.h"
 #include "base/memory.h"
 #include "doc/cel.h"
 #include "doc/layer.h"
@@ -156,6 +156,11 @@ DocApi Doc::getApi(Transaction& transaction)
 //////////////////////////////////////////////////////////////////////
 // Main properties
 
+bool Doc::isUndoing() const
+{
+  return m_undo->isUndoing();
+}
+
 color_t Doc::bgColor() const
 {
   return color_utils::color_for_target(
@@ -260,9 +265,23 @@ void Doc::notifySelectionBoundariesChanged()
   notify_observers<DocEvent&>(&DocObserver::onSelectionBoundariesChanged, ev);
 }
 
+void Doc::notifyTilesetChanged(Tileset* tileset)
+{
+  DocEvent ev(this);
+  ev.tileset(tileset);
+  notify_observers<DocEvent&>(&DocObserver::onTilesetChanged, ev);
+}
+
+void Doc::notifyLayerGroupCollapseChange(Layer* layer)
+{
+  DocEvent ev(this);
+  ev.layer(layer);
+  notify_observers<DocEvent&>(&DocObserver::onLayerCollapsedChanged, ev);
+}
+
 bool Doc::isModified() const
 {
-  return !m_undo->isSavedState();
+  return !m_undo->isInSavedStateOrSimilar();
 }
 
 bool Doc::isAssociatedToFile() const
@@ -272,8 +291,8 @@ bool Doc::isAssociatedToFile() const
 
 void Doc::markAsSaved()
 {
-  m_undo->markSavedState();
   m_flags |= kAssociatedToFile;
+  m_undo->markSavedState();
 }
 
 void Doc::impossibleToBackToSavedState()
@@ -311,6 +330,25 @@ void Doc::markAsBackedUp()
 bool Doc::isFullyBackedUp() const
 {
   return (m_flags & kFullyBackedUp ? true: false);
+}
+
+void Doc::markAsReadOnly()
+{
+  DOC_TRACE("DOC: Mark as read-only", this);
+
+  m_flags |= kReadOnly;
+}
+
+bool Doc::isReadOnly() const
+{
+  return (m_flags & kReadOnly ? true: false);
+}
+
+void Doc::removeReadOnlyMark()
+{
+  DOC_TRACE("DOC: Read-only mark removed", this);
+
+  m_flags &= ~kReadOnly;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -396,7 +434,7 @@ void Doc::setTransformation(const Transformation& transform)
 
 void Doc::resetTransformation()
 {
-  m_transformation = Transformation(gfx::RectF(m_mask->bounds()));
+  m_transformation = Transformation(gfx::RectF(m_mask->bounds()), m_transformation.cornerThick());
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -444,7 +482,8 @@ void Doc::copyLayerContent(const Layer* sourceLayer0, Doc* destDoc, Layer* destL
                                    it->second));
       }
       else {
-        newCel.reset(create_cel_copy(sourceCel,
+        newCel.reset(create_cel_copy(nullptr, // TODO add undo information?
+                                     sourceCel,
                                      destLayer->sprite(),
                                      destLayer,
                                      sourceCel->frame()));

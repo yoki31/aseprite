@@ -1,5 +1,5 @@
 // Aseprite Document Library
-// Copyright (c) 2019 Igara Studio S.A.
+// Copyright (c) 2019-2023 Igara Studio S.A.
 // Copyright (c) 2001-2016 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -11,10 +11,13 @@
 
 #include "doc/cel.h"
 
-#include "gfx/rect.h"
+#include "doc/grid.h"
 #include "doc/image.h"
 #include "doc/layer.h"
+#include "doc/layer_tilemap.h"
 #include "doc/sprite.h"
+#include "doc/tile.h"
+#include "gfx/rect.h"
 
 namespace doc {
 
@@ -43,6 +46,7 @@ Cel* Cel::MakeCopy(const frame_t newFrame,
 
   cel->setPosition(other->position());
   cel->setOpacity(other->opacity());
+  cel->setZIndex(other->zIndex());
   return cel;
 }
 
@@ -50,7 +54,9 @@ Cel* Cel::MakeCopy(const frame_t newFrame,
 Cel* Cel::MakeLink(const frame_t newFrame,
                    const Cel* other)
 {
-  return new Cel(newFrame, other->dataRef());
+  Cel* cel = new Cel(newFrame, other->dataRef());
+  cel->setZIndex(other->zIndex());
+  return cel;
 }
 
 void Cel::setFrame(frame_t frame)
@@ -88,6 +94,11 @@ void Cel::setBoundsF(const gfx::RectF& bounds)
 void Cel::setOpacity(int opacity)
 {
   m_data->setOpacity(opacity);
+}
+
+void Cel::setZIndex(int zindex)
+{
+  m_zIndex = zindex;
 }
 
 Document* Cel::document() const
@@ -145,11 +156,29 @@ void Cel::setParentLayer(LayerImage* layer)
   fixupImage();
 }
 
+Grid Cel::grid() const
+{
+  if (m_layer) {
+    if (m_layer->isTilemap()) {
+      doc::Grid grid = static_cast<LayerTilemap*>(m_layer)->tileset()->grid();
+      grid.origin(grid.origin() + position());
+      return grid;
+    }
+    else
+      return m_layer->grid();
+  }
+  return Grid();
+}
+
 void Cel::fixupImage()
 {
   // Change the mask color to the sprite mask color
-  if (m_layer && image())
-    image()->setMaskColor(m_layer->sprite()->transparentColor());
+  if (m_layer && image()) {
+    image()->setMaskColor((image()->pixelFormat() == IMAGE_TILEMAP) ?
+                            notile : m_layer->sprite()->transparentColor());
+    ASSERT(m_data);
+    m_data->adjustBounds(m_layer);
+  }
 }
 
 } // namespace doc

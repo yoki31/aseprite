@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -19,6 +19,7 @@
 #include "app/context_access.h"
 #include "app/doc.h"
 #include "app/file/palette_file.h"
+#include "app/i18n/strings.h"
 #include "app/modules/gfx.h"
 #include "app/modules/gui.h"
 #include "app/modules/palettes.h"
@@ -65,13 +66,13 @@ public:
     }
 
   private:
-    void onClick(Event& ev) override {
+    void onClick() override {
       m_colorPopup->setColorWithSignal(m_color, ChangeType);
     }
 
     void onPaint(PaintEvent& ev) override {
       Graphics* g = ev.graphics();
-      skin::SkinTheme* theme = skin::SkinTheme::instance();
+      auto theme = skin::SkinTheme::get(this);
       gfx::Rect rc = clientBounds();
 
       Button::onPaint(ev);
@@ -96,8 +97,9 @@ public:
       Item* item = new Item(colorPopup, color);
       item->InitTheme.connect(
         [item]{
+          auto theme = skin::SkinTheme::get(item);
           item->setSizeHint(gfx::Size(16, 16)*ui::guiscale());
-          item->setStyle(skin::SkinTheme::instance()->styles.simpleColor());
+          item->setStyle(theme->styles.simpleColor());
         });
       item->initTheme();
       addChild(item);
@@ -178,7 +180,7 @@ ColorPopup::ColorPopup(const ColorButtonOptions& options)
                    nullptr)
   , m_simpleColors(nullptr)
   , m_oldAndNew(Shade(2), ColorShades::ClickEntries)
-  , m_maskLabel("Transparent Color Selected")
+  , m_maskLabel(Strings::color_popup_transparent_color_sel())
   , m_canPin(options.canPinSelector)
   , m_insideChange(false)
   , m_disableHexUpdate(false)
@@ -188,14 +190,14 @@ ColorPopup::ColorPopup(const ColorButtonOptions& options)
       ResourceFinder rf;
       rf.includeDataDir("palettes/tags.gpl");
       if (rf.findFirst())
-        g_simplePal.reset(load_palette(rf.filename().c_str()));
+        g_simplePal = load_palette(rf.filename().c_str());
     }
 
     if (g_simplePal)
       m_simpleColors = new SimpleColors(this, &m_tooltips);
   }
 
-  ButtonSet::Item* item = m_colorType.addItem("Index");
+  ButtonSet::Item* item = m_colorType.addItem(Strings::color_popup_index());
   item->setFocusStop(false);
   if (!options.showIndexTab)
     item->setVisible(false);
@@ -372,16 +374,14 @@ void ColorPopup::onMakeFixed()
 
 void ColorPopup::onPaletteViewIndexChange(int index, ui::MouseButton button)
 {
-  base::ScopedValue<bool> restore(m_insideChange, true,
-                                  m_insideChange);
+  base::ScopedValue restore(m_insideChange, true);
 
   setColorWithSignal(app::Color::fromIndex(index), ChangeType);
 }
 
 void ColorPopup::onColorSlidersChange(ColorSlidersChangeEvent& ev)
 {
-  base::ScopedValue<bool> restore(m_insideChange, true,
-                                  m_insideChange);
+  base::ScopedValue restore(m_insideChange, true);
 
   setColorWithSignal(ev.color(), DontChangeType);
   findBestfitIndex(ev.color());
@@ -389,8 +389,7 @@ void ColorPopup::onColorSlidersChange(ColorSlidersChangeEvent& ev)
 
 void ColorPopup::onColorHexEntryChange(const app::Color& color)
 {
-  base::ScopedValue<bool> restore(m_insideChange, true,
-                                  m_insideChange);
+  base::ScopedValue restore(m_insideChange, true);
 
   // Disable updating the hex entry so we don't override what the user
   // is writting in the text field.
@@ -446,8 +445,7 @@ void ColorPopup::onSimpleColorClick()
 
 void ColorPopup::onColorTypeClick()
 {
-  base::ScopedValue<bool> restore(m_insideChange, true,
-                                  m_insideChange);
+  base::ScopedValue restore(m_insideChange, true);
 
   if (m_simpleColors)
     m_simpleColors->deselect();
@@ -490,8 +488,7 @@ void ColorPopup::onColorTypeClick()
 
 void ColorPopup::onPaletteChange()
 {
-  base::ScopedValue<bool> restore(m_insideChange, inEditMode(),
-                                  m_insideChange);
+  base::ScopedValue restore(m_insideChange, inEditMode());
 
   setColor(getColor(), DontChangeType);
   invalidate();

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -13,7 +13,6 @@
 #include "app/i18n/strings.h"
 #include "app/modules/gui.h"
 #include "app/ui/skin/skin_theme.h"
-#include "base/clamp.h"
 #include "ui/scale.h"
 
 #include <limits>
@@ -34,7 +33,7 @@ TaskWidget::TaskWidget(const Type type,
     addChild(&m_cancelButton);
 
     m_cancelButton.Click.connect(
-      [this](Event&){
+      [this](){
         m_task.cancel();
         m_cancelButton.setEnabled(false);
         m_progressBar.setEnabled(false);
@@ -56,9 +55,9 @@ TaskWidget::TaskWidget(const Type type,
         float v = m_task.progress();
         if (v > 0.0f) {
           TRACEARGS("progressBar setValue",
-                    int(base::clamp(v*100.0f, 0.0f, 100.0f)));
+                    int(std::clamp(v*100.0f, 0.0f, 100.0f)));
           m_progressBar.setValue(
-            int(base::clamp(v*100.0f, 0.0f, 100.0f)));
+            int(std::clamp(v*100.0f, 0.0f, 100.0f)));
         }
       }
     });
@@ -66,7 +65,7 @@ TaskWidget::TaskWidget(const Type type,
 
   InitTheme.connect(
     [this]{
-      auto theme = static_cast<SkinTheme*>(this->theme());
+      auto theme = SkinTheme::get(this);
       setTransparent(true);
       setBgColor(gfx::ColorNone);
       m_cancelButton.setTransparent(true);

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -15,10 +15,10 @@
 #include "os/shortcut.h"
 #include "ui/menu.h"
 
+#include <cstddef>
 #include <memory>
 
 namespace app {
-  class Command;
 
   // A widget that represent a menu item of the application.
   //
@@ -34,8 +34,9 @@ namespace app {
     };
 
     AppMenuItem(const std::string& text,
-                Command* command = nullptr,
+                const std::string& commandId = std::string(),
                 const Params& params = Params());
+    AppMenuItem(const std::string& text, std::nullptr_t) = delete;
 
     KeyPtr key() { return m_key; }
     void setKey(const KeyPtr& key);
@@ -43,13 +44,21 @@ namespace app {
     void setIsRecentFileItem(bool state) { m_isRecentFileItem = state; }
     bool isRecentFileItem() const { return m_isRecentFileItem; }
 
-    Command* getCommand() { return m_command; }
+    std::string getCommandId() const { return m_commandId; }
+    Command* getCommand() const;
     const Params& getParams() const { return m_params; }
 
     Native* native() const { return m_native.get(); }
     void setNative(const Native& native);
     void disposeNative();
     void syncNativeMenuItemKeyShortcut();
+
+    // Indicates if this is the standard "Edit" menu, used for macOS
+    // which requires a standard "Edit" menu when the native file
+    // dialog is displayed, so Command+C/X/V/A, etc. shortcuts start
+    // working as expected.
+    bool isStandardEditMenu() const { return m_isStandardEditMenu; }
+    void setStandardEditMenu() { m_isStandardEditMenu = true; }
 
     static void setContextParams(const Params& params);
 
@@ -61,9 +70,10 @@ namespace app {
 
   private:
     KeyPtr m_key;
-    Command* m_command;
+    std::string m_commandId;
     Params m_params;
-    bool m_isRecentFileItem;
+    bool m_isRecentFileItem = false;
+    bool m_isStandardEditMenu = false;
     std::unique_ptr<Native> m_native;
 
     static Params s_contextParams;

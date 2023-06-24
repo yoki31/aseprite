@@ -1,3 +1,6 @@
+[submodule "tests/third_party/json"]
+	path = tests/third_party/json
+	url = https://github.com/aseprite/json.lua
 [submodule "third_party/pixman"]
 	path = third_party/pixman
 	url = https://github.com/aseprite/pixman.git
@@ -71,4 +74,13 @@
 	url = https://github.com/aseprite/curl.git
 [submodule "third_party/IXWebSocket"]
 	path = third_party/IXWebSocket
-	url = https://github.com/machinezone/IXWebSocket
+	url = https://github.com/aseprite/IXWebSocket.git
+[submodule "third_party/cityhash"]
+	path = third_party/cityhash
+	url = https://github.com/aseprite/cityhash.git
+[submodule "src/psd"]
+	path = src/psd
+	url = https://github.com/aseprite/psd.git
+[submodule "third_party/qoi"]
+	path = third_party/qoi
+	url = https://github.com/aseprite/qoi.git

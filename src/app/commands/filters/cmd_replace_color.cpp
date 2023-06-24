@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -22,6 +22,7 @@
 #include "app/commands/new_params.h"
 #include "app/context.h"
 #include "app/find_widget.h"
+#include "app/i18n/strings.h"
 #include "app/ini_file.h"
 #include "app/load_widget.h"
 #include "app/pref/preferences.h"
@@ -78,7 +79,9 @@ static const char* ConfigSection = "ReplaceColor";
 class ReplaceColorWindow : public FilterWindow {
 public:
   ReplaceColorWindow(ReplaceColorFilterWrapper& filter, FilterManagerImpl& filterMgr)
-    : FilterWindow("Replace Color", ConfigSection, &filterMgr,
+    : FilterWindow(Strings::replace_color_title().c_str(),
+                   ConfigSection,
+                   &filterMgr,
                    WithChannelsSelector,
                    WithoutTiledCheckBox)
     , m_filter(filter)
@@ -101,16 +104,19 @@ public:
 private:
 
   void onFromChange(const app::Color& color) {
+    stopPreview();
     m_filter.setFrom(color);
     restartPreview();
   }
 
   void onToChange(const app::Color& color) {
+    stopPreview();
     m_filter.setTo(color);
     restartPreview();
   }
 
   void onToleranceChange() {
+    stopPreview();
     m_filter.setTolerance(m_toleranceSlider->getValue());
     restartPreview();
   }

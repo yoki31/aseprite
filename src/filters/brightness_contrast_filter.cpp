@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2017  David Capello
 //
 // This program is distributed under the terms of
@@ -11,7 +11,6 @@
 
 #include "filters/brightness_contrast_filter.h"
 
-#include "base/clamp.h"
 #include "doc/image.h"
 #include "doc/palette.h"
 #include "doc/rgbmap.h"
@@ -56,19 +55,9 @@ void BrightnessContrastFilter::applyToRgba(FilterManager* filterMgr)
   FilterIndexedData* fid = filterMgr->getIndexedData();
   const Palette* pal = fid->getPalette();
   Palette* newPal = (m_usePaletteOnRGB ? fid->getNewPalette(): nullptr);
-  const uint32_t* src_address = (uint32_t*)filterMgr->getSourceAddress();
-  uint32_t* dst_address = (uint32_t*)filterMgr->getDestinationAddress();
-  const int w = filterMgr->getWidth();
-  const Target target = filterMgr->getTarget();
 
-  for (int x=0; x<w; x++) {
-    if (filterMgr->skipPixel()) {
-      ++src_address;
-      ++dst_address;
-      continue;
-    }
-
-    color_t c = *(src_address++);
+  FILTER_LOOP_THROUGH_ROW_BEGIN(uint32_t) {
+    color_t c = *src_address;
 
     if (newPal) {
       int i =
@@ -83,32 +72,23 @@ void BrightnessContrastFilter::applyToRgba(FilterManager* filterMgr)
       applyFilterToRgb(target, c);
     }
 
-    *(dst_address++) = c;
+    *dst_address = c;
   }
+  FILTER_LOOP_THROUGH_ROW_END()
 }
 
 void BrightnessContrastFilter::applyToGrayscale(FilterManager* filterMgr)
 {
-  const uint16_t* src_address = (uint16_t*)filterMgr->getSourceAddress();
-  uint16_t* dst_address = (uint16_t*)filterMgr->getDestinationAddress();
-  const int w = filterMgr->getWidth();
-  const Target target = filterMgr->getTarget();
-
-  for (int x=0; x<w; x++) {
-    if (filterMgr->skipPixel()) {
-      ++src_address;
-      ++dst_address;
-      continue;
-    }
-
-    color_t c = *(src_address++);
+  FILTER_LOOP_THROUGH_ROW_BEGIN(uint16_t) {
+    color_t c = *src_address;
     int k = graya_getv(c);
     int a = graya_geta(c);
 
     if (target & TARGET_GRAY_CHANNEL) k = m_cmap[k];
 
-    *(dst_address++) = graya(k, a);
+    *dst_address = graya(k, a);
   }
+  FILTER_LOOP_THROUGH_ROW_END()
 }
 
 void BrightnessContrastFilter::applyToIndexed(FilterManager* filterMgr)
@@ -122,34 +102,22 @@ void BrightnessContrastFilter::applyToIndexed(FilterManager* filterMgr)
     return;
 
   // Apply filter to color region
-  const Target target = filterMgr->getTarget();
   const Palette* pal = fid->getPalette();
   const RgbMap* rgbmap = fid->getRgbMap();
-  const uint8_t* src_address = (uint8_t*)filterMgr->getSourceAddress();
-  uint8_t* dst_address = (uint8_t*)filterMgr->getDestinationAddress();
-  const int w = filterMgr->getWidth();
 
-  for (int x=0; x<w; x++) {
-    if (filterMgr->skipPixel()) {
-      ++src_address;
-      ++dst_address;
-      continue;
-    }
-
-    color_t c = pal->getEntry(*(src_address++));
+  FILTER_LOOP_THROUGH_ROW_BEGIN(uint8_t) {
+    color_t c = pal->getEntry(*src_address);
     applyFilterToRgb(target, c);
-    *(dst_address++) = rgbmap->mapColor(rgba_getr(c),
-                                        rgba_getg(c),
-                                        rgba_getb(c),
-                                        rgba_geta(c));
+    *dst_address = rgbmap->mapColor(c);
   }
+  FILTER_LOOP_THROUGH_ROW_END()
 }
 
 void BrightnessContrastFilter::onApplyToPalette(FilterManager* filterMgr,
                                                 const PalettePicks& picks)
 {
-  const Target target = filterMgr->getTarget();
   FilterIndexedData* fid = filterMgr->getIndexedData();
+  const Target target = filterMgr->getTarget();
   const Palette* pal = fid->getPalette();
   Palette* newPal = fid->getNewPalette();
 
@@ -189,7 +157,7 @@ void BrightnessContrastFilter::updateMap()
     double x = double(u) / double(max-1);
     double y = (m_contrast+1.0) * (x - 0.5) + 0.5;
     y = y*(1.0+m_brightness);
-    y = base::clamp(y, 0.0, 1.0);
+    y = std::clamp(y, 0.0, 1.0);
     m_cmap[u] = int(255.5 * y);
   }
 }

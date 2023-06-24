@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -13,17 +13,14 @@
 #include "app/commands/new_params.h"
 #include "app/context_access.h"
 #include "app/doc_api.h"
-#include "app/modules/editors.h"
 #include "app/modules/gui.h"
 #include "app/tx.h"
-#include "app/ui/button_set.h"
 #include "app/ui/color_bar.h"
 #include "app/ui/doc_view.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/editor/select_box_state.h"
 #include "app/ui/skin/skin_theme.h"
 #include "app/ui_context.h"
-#include "base/clamp.h"
 #include "doc/image.h"
 #include "doc/mask.h"
 #include "doc/sprite.h"
@@ -62,7 +59,7 @@ public:
 
   CanvasSizeWindow(const CanvasSizeParams& params,
                    const gfx::Rect& bounds)
-    : m_editor(current_editor)
+    : m_editor(Editor::activeEditor())
     , m_rect(bounds)
     , m_selectBoxState(
       new SelectBoxState(
@@ -142,8 +139,9 @@ protected:
     updateEditorBoxFromRect();
   }
 
-  virtual void onBroadcastMouseMessage(WidgetsList& targets) override {
-    Window::onBroadcastMouseMessage(targets);
+  virtual void onBroadcastMouseMessage(const gfx::Point& screenPos,
+                                       WidgetsList& targets) override {
+    Window::onBroadcastMouseMessage(screenPos, targets);
 
     // Add the editor as receptor of mouse events too.
     targets.push_back(View::getView(m_editor));
@@ -220,8 +218,8 @@ private:
   void updateBorderFromRect() {
     setLeft(-m_rect.x);
     setTop(-m_rect.y);
-    setRight((m_rect.x + m_rect.w) - current_editor->sprite()->width());
-    setBottom((m_rect.y + m_rect.h) - current_editor->sprite()->height());
+    setRight((m_rect.x + m_rect.w) - m_editor->sprite()->width());
+    setBottom((m_rect.y + m_rect.h) - m_editor->sprite()->height());
   }
 
   void updateEditorBoxFromRect() {
@@ -232,7 +230,7 @@ private:
   }
 
   void updateIcons() {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
 
     int sel = dir()->selectedItem();
 
@@ -341,12 +339,17 @@ void CanvasSizeCommand::onExecute(Context* context)
 
     // Find best position for the window on the editor
     if (DocView* docView = static_cast<UIContext*>(context)->activeView()) {
-      window->positionWindow(
-        docView->bounds().x2() - window->bounds().w,
-        docView->bounds().y);
+      Display* display = ui::Manager::getDefault()->display();
+      ui::fit_bounds(display,
+                     window.get(),
+                     gfx::Rect(docView->bounds().x2() - window->bounds().w,
+                               docView->bounds().y,
+                               window->bounds().w,
+                               window->bounds().h));
     }
-    else
+    else {
       window->centerWindow();
+    }
 
     load_window_pos(window.get(), "CanvasSize");
     window->setVisible(true);

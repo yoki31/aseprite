@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -24,7 +24,6 @@
 #include "app/ui/separator_in_view.h"
 #include "app/ui/skin/skin_theme.h"
 #include "app/widget_loader.h"
-#include "base/clamp.h"
 #include "base/convert_to.h"
 #include "base/fs.h"
 #include "base/paths.h"
@@ -55,6 +54,8 @@ using namespace app::skin;
 using namespace ui;
 
 namespace {
+
+const char* kConfigSection = "FileSelector";
 
 template<class Container>
 class NullableIterator {
@@ -128,7 +129,7 @@ void adjust_navigation_history(IFileItem* item)
   }
 
   if (valid && !navigation_history.empty()) {
-    pos = base::clamp(pos, 0, (int)navigation_history.size()-1);
+    pos = std::clamp(pos, 0, (int)navigation_history.size()-1);
     navigation_position.set(navigation_history.begin() + pos);
 
     FILESEL_TRACE("FILESEL: New navigation pos [%d] = %s\n",
@@ -280,6 +281,9 @@ protected:
         bool back = (msg->altPressed() && scancode == kKeyLeft);
         bool forward = (msg->altPressed() && scancode == kKeyRight);
 #endif
+        bool refresh = (scancode == kKeyF5 ||
+                        (msg->ctrlPressed() && scancode == kKeyR) ||
+                        (msg->cmdPressed() && scancode == kKeyR));
 
         if (up) {
           m_filesel->goUp();
@@ -296,6 +300,9 @@ protected:
         if (forward) {
           m_filesel->goForward();
           return true;
+        }
+        if (refresh) {
+          m_filesel->refreshCurrentFolder();
         }
         return false;
       }
@@ -320,6 +327,7 @@ FileSelector::FileSelector(FileSelectorType type)
   goBackButton()->setFocusStop(false);
   goForwardButton()->setFocusStop(false);
   goUpButton()->setFocusStop(false);
+  refreshButton()->setFocusStop(false);
   newFolderButton()->setFocusStop(false);
   viewType()->setFocusStop(false);
   for (auto child : viewType()->children())
@@ -338,6 +346,7 @@ FileSelector::FileSelector(FileSelectorType type)
   goBackButton()->Click.connect([this]{ onGoBack(); });
   goForwardButton()->Click.connect([this]{ onGoForward(); });
   goUpButton()->Click.connect([this]{ onGoUp(); });
+  refreshButton()->Click.connect([this] { onRefreshFolder(); });
   newFolderButton()->Click.connect([this]{ onNewFolder(); });
   viewType()->ItemChange.connect([this]{ onChangeViewType(); });
   location()->CloseListBox.connect([this]{ onLocationCloseListBox(); });
@@ -378,6 +387,11 @@ void FileSelector::goInsideFolder()
     m_fileList->setCurrentFolder(
       m_fileList->selectedFileItem());
   }
+}
+
+void FileSelector::refreshCurrentFolder()
+{
+  onRefreshFolder();
 }
 
 bool FileSelector::show(
@@ -421,9 +435,14 @@ bool FileSelector::show(
 
   FILESEL_TRACE("FILESEL: Start folder '%s' (%p)\n", start_folder_path.c_str(), start_folder);
 
-  setMinSize(gfx::Size(ui::display_w()*9/10, ui::display_h()*9/10));
+  {
+    const gfx::Size workareaSize = ui::Manager::getDefault()->display()->workareaSizeUIScale();
+    setMinSize(workareaSize*9/10);
+  }
+
   remapWindow();
   centerWindow();
+  load_window_pos(this, kConfigSection);
 
   // Change the file formats/extensions to be shown
   std::string initialExtension = base::get_file_extension(initialPath);
@@ -466,7 +485,8 @@ bool FileSelector::show(
 
   // File type for all formats
   fileType()->addItem(
-    new CustomFileExtensionItem("All formats", allExtensions));
+    new CustomFileExtensionItem(Strings::file_selector_all_formats(),
+                                allExtensions));
 
   // One file type for each supported image format
   for (const auto& e : allExtensions) {
@@ -480,7 +500,7 @@ bool FileSelector::show(
   }
   // All files
   fileType()->addItem(
-    new CustomFileExtensionItem("All files",
+    new CustomFileExtensionItem(Strings::file_selector_all_files(),
                                 base::paths())); // Empty extensions means "*.*"
 
   // file name entry field
@@ -690,6 +710,16 @@ again:
   return (!output.empty());
 }
 
+bool FileSelector::onProcessMessage(ui::Message* msg)
+{
+  switch (msg->type()) {
+    case kCloseMessage:
+      save_window_pos(this, kConfigSection);
+      break;
+  }
+  return app::gen::FileSelector::onProcessMessage(msg);
+}
+
 // Updates the content of the combo-box that shows the current
 // location in the file-system.
 void FileSelector::updateLocation()
@@ -857,6 +887,14 @@ void FileSelector::onGoForward()
 void FileSelector::onGoUp()
 {
   m_fileList->goUp();
+}
+
+void FileSelector::onRefreshFolder()
+{
+  auto fs = FileSystemModule::instance();
+  fs->refresh();
+
+  m_fileList->setCurrentFolder(m_fileList->currentFolder());
 }
 
 void FileSelector::onNewFolder()

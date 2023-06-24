@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -39,6 +39,25 @@ public:
 
   void getModifiedArea(ToolLoop* loop, int x, int y, Rect& area) override {
     area = Rect(x, y, 1, 1);
+  }
+};
+
+class TilePointShape : public PointShape {
+public:
+  bool isPixel() override { return true; }
+  bool isTile() override { return true; }
+
+  void transformPoint(ToolLoop* loop, const Stroke::Pt& pt) override {
+    const doc::Grid& grid = loop->getGrid();
+    gfx::Point newPos = grid.canvasToTile(pt.toPoint());
+
+    loop->getInk()->prepareForPointShape(loop, true, newPos.x, newPos.y);
+    doInkHline(newPos.x, newPos.y, newPos.x, loop);
+  }
+
+  void getModifiedArea(ToolLoop* loop, int x, int y, Rect& area) override {
+    const doc::Grid& grid = loop->getGrid();
+    area = grid.alignBounds(Rect(x, y, 1, 1));
   }
 };
 
@@ -98,35 +117,49 @@ public:
         color_t b = m_primaryColor;
         const float t = pt.gradient;
         const float ti = 1.0f - pt.gradient;
+
+        auto rgbaGradient = [t, ti](color_t a, color_t b) -> color_t {
+          if (rgba_geta(a) == 0)
+            return doc::rgba(rgba_getr(b),
+                             rgba_getg(b),
+                             rgba_getb(b),
+                             int(t*rgba_geta(b)));
+          else if (rgba_geta(b) == 0)
+            return doc::rgba(rgba_getr(a),
+                             rgba_getg(a),
+                             rgba_getb(a),
+                             int(ti*rgba_geta(a)));
+          else
+            return doc::rgba(int(ti*rgba_getr(a) + t*rgba_getr(b)),
+                             int(ti*rgba_getg(a) + t*rgba_getg(b)),
+                             int(ti*rgba_getb(a) + t*rgba_getb(b)),
+                             int(ti*rgba_geta(a) + t*rgba_geta(b)));
+        };
+
         switch (loop->sprite()->pixelFormat()) {
           case IMAGE_RGB:
-            if (rgba_geta(a) == 0) a = b;
-            else if (rgba_geta(b) == 0) b = a;
-            a = doc::rgba(int(ti*rgba_getr(a) + t*rgba_getr(b)),
-                          int(ti*rgba_getg(a) + t*rgba_getg(b)),
-                          int(ti*rgba_getb(a) + t*rgba_getb(b)),
-                          int(ti*rgba_geta(a) + t*rgba_geta(b)));
+            a = rgbaGradient(a, b);
             break;
           case IMAGE_GRAYSCALE:
-            if (graya_geta(a) == 0) a = b;
-            else if (graya_geta(b) == 0) b = a;
-            a = doc::graya(int(ti*graya_getv(a) + t*graya_getv(b)),
-                           int(ti*graya_geta(a) + t*graya_geta(b)));
+            if (graya_geta(a) == 0)
+              a = doc::graya(graya_getv(b),
+                             int(t*graya_geta(b)));
+            else if (graya_geta(b) == 0)
+              a = doc::graya(graya_getv(a),
+                             int(ti*graya_geta(a)));
+            else
+              a = doc::graya(int(ti*graya_getv(a) + t*graya_getv(b)),
+                             int(ti*graya_geta(a) + t*graya_geta(b)));
             break;
           case IMAGE_INDEXED: {
             int maskIndex = (loop->getLayer()->isBackground() ? -1: loop->sprite()->transparentColor());
             // Convert index to RGBA
             if (a == maskIndex) a = 0;
-            else a = get_current_palette()->getEntry(a);
+            else a = loop->getPalette()->getEntry(a);
             if (b == maskIndex) b = 0;
-            else b = get_current_palette()->getEntry(b);
+            else b = loop->getPalette()->getEntry(b);
             // Same as in RGBA gradient
-            if (rgba_geta(a) == 0) a = b;
-            else if (rgba_geta(b) == 0) b = a;
-            a = doc::rgba(int(ti*rgba_getr(a) + t*rgba_getr(b)),
-                          int(ti*rgba_getg(a) + t*rgba_getg(b)),
-                          int(ti*rgba_getb(a) + t*rgba_getb(b)),
-                          int(ti*rgba_geta(a) + t*rgba_geta(b)));
+            a = rgbaGradient(a, b);
             // Convert RGBA to index
             a = loop->getRgbMap()->mapColor(rgba_getr(a),
                                             rgba_getg(a),
@@ -139,8 +172,8 @@ public:
       }
 
       // Dynamic size and angle
-      int size = base::clamp(int(pt.size), int(Brush::kMinBrushSize), int(Brush::kMaxBrushSize));
-      int angle = base::clamp(int(pt.angle), -180, 180);
+      int size = std::clamp(int(pt.size), int(Brush::kMinBrushSize), int(Brush::kMaxBrushSize));
+      int angle = std::clamp(int(pt.angle), -180, 180);
       if ((brush->size() != size) ||
           (brush->angle() != angle && m_origBrushType != kCircleBrushType) ||
           (m_hasDynamicGradient && pt.gradient != m_lastGradientValue)) {
@@ -273,10 +306,18 @@ public:
 
   void transformPoint(ToolLoop* loop, const Stroke::Pt& pt) override {
     const doc::Image* srcImage = loop->getFloodFillSrcImage();
-    gfx::Point wpt = wrap_point(loop->getTiledMode(),
-                                gfx::Size(srcImage->width(),
-                                          srcImage->height()),
-                                pt.toPoint(), true);
+    const bool tilesMode = (srcImage->pixelFormat() == IMAGE_TILEMAP);
+    gfx::Point wpt = pt.toPoint();
+    if (tilesMode) { // Tiles mode
+      const doc::Grid& grid = loop->getGrid();
+      wpt = grid.canvasToTile(wpt);
+    }
+    else {
+      wpt = wrap_point(loop->getTiledMode(),
+                       gfx::Size(srcImage->width(),
+                                 srcImage->height()),
+                       wpt, true);
+    }
 
     loop->getInk()->prepareForPointShape(loop, true, wpt.x, wpt.y);
 
@@ -284,7 +325,8 @@ public:
       srcImage,
       (loop->useMask() ? loop->getMask(): nullptr),
       wpt.x, wpt.y,
-      floodfillBounds(loop, wpt.x, wpt.y),
+      (tilesMode ? srcImage->bounds():
+                   floodfillBounds(loop, wpt.x, wpt.y)),
       get_pixel(srcImage, wpt.x, wpt.y),
       loop->getTolerance(),
       loop->getContiguous(),
@@ -298,11 +340,16 @@ public:
 
 private:
   gfx::Rect floodfillBounds(ToolLoop* loop, int x, int y) const {
+    const doc::Image* srcImage = loop->getFloodFillSrcImage();
     gfx::Rect bounds = loop->sprite()->bounds();
-    bounds &= loop->getFloodFillSrcImage()->bounds();
+    bounds &= srcImage->bounds();
 
+    if (srcImage->pixelFormat() == IMAGE_TILEMAP) { // Tiles mode
+      const doc::Grid& grid = loop->getGrid();
+      bounds = grid.tileToCanvas(bounds);
+    }
     // Limit the flood-fill to the current tile if the grid is visible.
-    if (loop->getStopAtGrid()) {
+    else if (loop->getStopAtGrid()) {
       gfx::Rect grid = loop->getGridBounds();
       if (!grid.isEmpty()) {
         div_t d, dx, dy;
@@ -358,22 +405,15 @@ public:
     m_pointRemainder = points_to_spray - integral_points;
     ASSERT(m_pointRemainder >= 0 && m_pointRemainder < 1.0f);
 
-    fixmath::fixed angle, radius;
+    double angle, radius;
 
     for (int c=0; c<integral_points; c++) {
-
-#if RAND_MAX <= 0xffff
-      // In Windows, rand() has a RAND_MAX too small
-      angle = fixmath::itofix(rand() * 255 / RAND_MAX);
-      radius = fixmath::itofix(rand() * spray_width / RAND_MAX);
-#else
-      angle = rand();
-      radius = rand() % fixmath::itofix(spray_width);
-#endif
+      angle = 360.0 * rand() / RAND_MAX;
+      radius = double(spray_width) * rand() / RAND_MAX;
 
       Stroke::Pt pt2(pt);
-      pt2.x += fixmath::fixtoi(fixmath::fixmul(radius, fixmath::fixcos(angle)));
-      pt2.y += fixmath::fixtoi(fixmath::fixmul(radius, fixmath::fixsin(angle)));
+      pt2.x += double(radius * std::cos(angle));
+      pt2.y += double(radius * std::sin(angle));
       m_subPointShape.transformPoint(loop, pt2);
     }
   }

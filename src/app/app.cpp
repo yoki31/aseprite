@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -22,6 +22,7 @@
 #include "app/commands/commands.h"
 #include "app/console.h"
 #include "app/crash/data_recovery.h"
+#include "app/drm.h"
 #include "app/extensions.h"
 #include "app/file/file.h"
 #include "app/file/file_formats_manager.h"
@@ -56,7 +57,6 @@
 #include "app/util/clipboard.h"
 #include "base/exception.h"
 #include "base/fs.h"
-#include "base/scoped_lock.h"
 #include "base/split_string.h"
 #include "doc/sprite.h"
 #include "fmt/format.h"
@@ -67,10 +67,13 @@
 #include "render/render.h"
 #include "ui/intern.h"
 #include "ui/ui.h"
+#include "updater/user_agent.h"
 #include "ver/info.h"
 
 #if LAF_MACOS
   #include "os/osx/system.h"
+#elif LAF_LINUX
+  #include "os/x11/system.h"
 #endif
 
 #include <iostream>
@@ -85,6 +88,9 @@
   #include "steam/steam.h"
 #endif
 
+#include <memory>
+#include <optional>
+
 namespace app {
 
 using namespace ui;
@@ -95,6 +101,7 @@ namespace {
 
 class ConsoleEngineDelegate : public script::EngineDelegate {
 public:
+  ConsoleEngineDelegate(Console& console) : m_console(console) { }
   void onConsoleError(const char* text) override {
     onConsolePrint(text);
   }
@@ -102,7 +109,7 @@ public:
     m_console.printf("%s\n", text);
   }
 private:
-  Console m_console;
+  Console& m_console;
 };
 
 } // anonymous namespace
@@ -142,12 +149,14 @@ public:
 #ifdef ENABLE_UI
   RecentFiles m_recent_files;
   InputChain m_inputChain;
-  clipboard::ClipboardManager m_clipboardManager;
+  Clipboard m_clipboard;
 #endif
+#ifdef ENABLE_DATA_RECOVERY
   // This is a raw pointer because we want to delete it explicitly.
   // (e.g. if an exception occurs, the ~Modules() doesn't have to
   // delete m_recovery)
-  app::crash::DataRecovery* m_recovery;
+  std::unique_ptr<app::crash::DataRecovery> m_recovery;
+#endif
 
   Modules(const bool createLogInDesktop,
           Preferences& pref)
@@ -157,20 +166,37 @@ public:
 #ifdef ENABLE_UI
     , m_recent_files(pref.general.recentItems())
 #endif
-    , m_recovery(nullptr) {
+#ifdef ENABLE_DATA_RECOVERY
+    , m_recovery(nullptr)
+#endif
+  {
   }
 
   ~Modules() {
-    ASSERT(m_recovery == nullptr);
+#ifdef ENABLE_DATA_RECOVERY
+    ASSERT(m_recovery == nullptr ||
+           ui::get_app_state() == ui::AppState::kClosingWithException);
+#endif
   }
 
   app::crash::DataRecovery* recovery() {
-    return m_recovery;
+#ifdef ENABLE_DATA_RECOVERY
+    return m_recovery.get();
+#else
+    return nullptr;
+#endif
   }
 
   void createDataRecovery(Context* ctx) {
 #ifdef ENABLE_DATA_RECOVERY
-    m_recovery = new app::crash::DataRecovery(ctx);
+
+#ifdef ENABLE_TRIAL_MODE
+    DRM_INVALID{
+      return;
+    }
+#endif
+
+    m_recovery = std::make_unique<app::crash::DataRecovery>(ctx);
     m_recovery->SessionsListIsReady.connect(
       [] {
         ui::assert_ui_thread();
@@ -185,6 +211,13 @@ public:
 
   void searchDataRecoverySessions() {
 #ifdef ENABLE_DATA_RECOVERY
+
+#ifdef ENABLE_TRIAL_MODE
+    DRM_INVALID{
+      return;
+    }
+#endif
+
     ASSERT(m_recovery);
     if (m_recovery)
       m_recovery->launchSearch();
@@ -193,10 +226,14 @@ public:
 
   void deleteDataRecovery() {
 #ifdef ENABLE_DATA_RECOVERY
-    if (m_recovery) {
-      delete m_recovery;
-      m_recovery = nullptr;
+
+#ifdef ENABLE_TRIAL_MODE
+    DRM_INVALID{
+      return;
     }
+#endif
+
+    m_recovery.reset();
 #endif
   }
 
@@ -218,7 +255,7 @@ App::App(AppMod* mod)
   , m_engine(new script::Engine)
 #endif
 {
-  ASSERT(m_instance == NULL);
+  ASSERT(m_instance == nullptr);
   m_instance = this;
 }
 
@@ -232,9 +269,10 @@ int App::initialize(const AppOptions& options)
   m_isGui = false;
 #endif
   m_isShell = options.startShell();
-  m_coreModules = new CoreModules;
+  m_coreModules = std::make_unique<CoreModules>();
 
 #if LAF_WINDOWS
+
   if (options.disableWintab() ||
       !preferences().experimental.loadWintabDriver() ||
       preferences().tablet.api() == "pointer") {
@@ -244,11 +282,20 @@ int App::initialize(const AppOptions& options)
     system->setTabletAPI(os::TabletAPI::WintabPackets);
   else // preferences().tablet.api() == "wintab"
     system->setTabletAPI(os::TabletAPI::Wintab);
-#endif
 
-#if LAF_MACOS
+#elif LAF_MACOS
+
   if (!preferences().general.osxAsyncView())
     os::osx_set_async_view(false);
+
+#elif LAF_LINUX
+
+  {
+    const std::string& stylusId = preferences().general.x11StylusId();
+    if (!stylusId.empty())
+      os::x11_set_user_defined_string_to_detect_stylus(stylusId);
+  }
+
 #endif
 
   system->setAppName(get_app_name());
@@ -274,11 +321,16 @@ int App::initialize(const AppOptions& options)
 
   initialize_color_spaces(preferences());
 
+#ifdef ENABLE_DRM
+  LOG("APP: Initializing DRM...\n");
+  app_configure_drm();
+#endif
+
   // Load modules
-  m_modules = new Modules(createLogInDesktop, preferences());
-  m_legacy = new LegacyModules(isGui() ? REQUIRE_INTERFACE: 0);
+  m_modules = std::make_unique<Modules>(createLogInDesktop, preferences());
+  m_legacy = std::make_unique<LegacyModules>(isGui() ? REQUIRE_INTERFACE: 0);
 #ifdef ENABLE_UI
-  m_brushes.reset(new AppBrushes);
+  m_brushes = std::make_unique<AppBrushes>();
 #endif
 
   // Data recovery is enabled only in GUI mode
@@ -299,7 +351,7 @@ int App::initialize(const AppOptions& options)
 
     // Set the ClipboardDelegate impl to copy/paste text in the native
     // clipboard from the ui::Entry control.
-    m_uiSystem->setClipboardDelegate(&m_modules->m_clipboardManager);
+    m_uiSystem->setClipboardDelegate(&m_modules->m_clipboard);
 
     // Setup the GUI cursor and redraw screen
     ui::set_use_native_cursors(preferences().cursor.useNativeCursor());
@@ -368,14 +420,61 @@ int App::initialize(const AppOptions& options)
   return code;
 }
 
+namespace {
+
+#ifdef ENABLE_UI
+  struct CloseMainWindow {
+    std::unique_ptr<MainWindow>& m_win;
+    CloseMainWindow(std::unique_ptr<MainWindow>& win) : m_win(win) { }
+    ~CloseMainWindow() { m_win.reset(nullptr); }
+  };
+#endif
+
+  struct CloseAllDocs {
+    Context* m_ctx;
+    CloseAllDocs(Context* ctx) : m_ctx(ctx) { }
+    ~CloseAllDocs() {
+      std::vector<Doc*> docs;
+#ifdef ENABLE_UI
+      for (Doc* doc : static_cast<UIContext*>(m_ctx)->getAndRemoveAllClosedDocs())
+        docs.push_back(doc);
+#endif
+      for (Doc* doc : m_ctx->documents())
+        docs.push_back(doc);
+      for (Doc* doc : docs) {
+        // First we close the document. In this way we receive recent
+        // notifications related to the document as a app::Doc. If
+        // we delete the document directly, we destroy the app::Doc
+        // too early, and then doc::~Document() call
+        // DocsObserver::onRemoveDocument(). In this way, observers
+        // could think that they have a fully created app::Doc when
+        // in reality it's a doc::Document (in the middle of a
+        // destruction process).
+        //
+        // TODO: This problem is because we're extending doc::Document,
+        // in the future, we should remove app::Doc.
+        doc->close();
+        delete doc;
+      }
+    }
+  };
+
+} // anonymous namespace
+
 void App::run()
 {
 #ifdef ENABLE_UI
+  CloseMainWindow closeMainWindow(m_mainWindow);
+#endif
+  CloseAllDocs closeAllDocsAtExit(context());
+
+#ifdef ENABLE_UI
   // Run the GUI
   if (isGui()) {
+    auto manager = ui::Manager::getDefault();
 #if LAF_WINDOWS
     // How to interpret one finger on Windows tablets.
-    ui::Manager::getDefault()->display()
+    manager->display()->nativeWindow()
       ->setInterpretOneFingerGestureAsMouseMovement(
         preferences().experimental.oneFingerAsMouseMovement());
 #endif
@@ -383,7 +482,7 @@ void App::run()
 #if LAF_LINUX
     // Setup app icon for Linux window managers
     try {
-      os::Window* display = os::instance()->defaultWindow();
+      os::Window* window = os::instance()->defaultWindow();
       os::SurfaceList icons;
 
       for (const int size : { 32, 64, 128 }) {
@@ -398,7 +497,7 @@ void App::run()
         }
       }
 
-      display->setIcons(icons);
+      window->setIcons(icons);
     }
     catch (const std::exception&) {
       // Just ignore the exception, we couldn't change the app icon, no
@@ -437,12 +536,19 @@ void App::run()
     Console console;
 #ifdef ENABLE_SCRIPTING
     // Use the app::Console() for script errors
-    ConsoleEngineDelegate delegate;
+    ConsoleEngineDelegate delegate(console);
     script::ScopedEngineDelegate setEngineDelegate(m_engine.get(), &delegate);
 #endif
 
     // Run the GUI main message loop
-    ui::Manager::getDefault()->run();
+    try {
+      manager->run();
+      set_app_state(AppState::kClosing);
+    }
+    catch (...) {
+      set_app_state(AppState::kClosingWithException);
+      throw;
+    }
   }
 #endif  // ENABLE_UI
 
@@ -462,6 +568,11 @@ void App::run()
   extensions().executeExitActions();
 #endif
 
+  close();
+}
+
+void App::close()
+{
 #ifdef ENABLE_UI
   if (isGui()) {
     // Select no document
@@ -470,37 +581,6 @@ void App::run()
     // Delete backups (this is a normal shutdown, we are not handling
     // exceptions, and we are not in a destructor).
     m_modules->deleteDataRecovery();
-  }
-#endif
-
-  // Destroy all documents from the UIContext.
-  std::vector<Doc*> docs;
-#ifdef ENABLE_UI
-  for (Doc* doc : static_cast<UIContext*>(context())->getAndRemoveAllClosedDocs())
-    docs.push_back(doc);
-#endif
-  for (Doc* doc : context()->documents())
-    docs.push_back(doc);
-  for (Doc* doc : docs) {
-    // First we close the document. In this way we receive recent
-    // notifications related to the document as a app::Doc. If
-    // we delete the document directly, we destroy the app::Doc
-    // too early, and then doc::~Document() call
-    // DocsObserver::onRemoveDocument(). In this way, observers
-    // could think that they have a fully created app::Doc when
-    // in reality it's a doc::Document (in the middle of a
-    // destruction process).
-    //
-    // TODO: This problem is because we're extending doc::Document,
-    // in the future, we should remove app::Doc.
-    doc->close();
-    delete doc;
-  }
-
-#ifdef ENABLE_UI
-  if (isGui()) {
-    // Destroy the window.
-    m_mainWindow.reset(nullptr);
   }
 #endif
 }
@@ -513,8 +593,16 @@ App::~App()
     ASSERT(m_instance == this);
 
 #ifdef ENABLE_SCRIPTING
-    // Destroy scripting engine
-    m_engine.reset(nullptr);
+    // Destroy scripting engine calling a method (instead of using
+    // reset()) because we need to keep the "m_engine" pointer valid
+    // until the very end, just in case that some Lua error happens
+    // now and we have to print that error using
+    // App::instance()->scriptEngine() in some way. E.g. if a Dialog
+    // onclose event handler fails with a Lua error when we are
+    // closing the app, a Lua error must be printed, and we need a
+    // valid m_engine pointer.
+    m_engine->destroy();
+    m_engine.reset();
 #endif
 
     // Delete file formats.
@@ -527,17 +615,14 @@ App::~App()
     // Finalize modules, configuration and core.
     Editor::destroyEditorSharedInternals();
 
-    if (m_backupIndicator) {
-      delete m_backupIndicator;
-      m_backupIndicator = nullptr;
-    }
+    m_backupIndicator.reset();
 
     // Save brushes
-    m_brushes.reset(nullptr);
+    m_brushes.reset();
 #endif
 
-    delete m_legacy;
-    delete m_modules;
+    m_legacy.reset();
+    m_modules.reset();
 
     // Save preferences only if we are running in GUI mode.  when we
     // run in batch mode we might want to reset some preferences so
@@ -546,15 +631,13 @@ App::~App()
     if (isGui())
       preferences().save();
 
-    delete m_coreModules;
+    m_coreModules.reset();
 
 #ifdef ENABLE_UI
     // Destroy the loaded gui.xml data.
-    delete KeyboardShortcuts::instance();
-    delete GuiXml::instance();
+    KeyboardShortcuts::destroyInstance();
+    GuiXml::destroyInstance();
 #endif
-
-    m_instance = NULL;
   }
   catch (const std::exception& e) {
     LOG(ERROR, "APP: Error: %s\n", e.what());
@@ -567,6 +650,8 @@ App::~App()
 
     // no re-throw
   }
+
+  m_instance = nullptr;
 }
 
 Context* App::context()
@@ -576,13 +661,12 @@ Context* App::context()
 
 bool App::isPortable()
 {
-  static bool* is_portable = NULL;
+  static std::optional<bool> is_portable;
   if (!is_portable) {
     is_portable =
-      new bool(
-        base::is_file(base::join_path(
-            base::get_file_path(base::get_app_path()),
-            "aseprite.ini")));
+      base::is_file(base::join_path(
+                      base::get_file_path(base::get_app_path()),
+                      "aseprite.ini"));
   }
   return *is_portable;
 }
@@ -664,7 +748,7 @@ void App::showBackupNotification(bool state)
   assert_ui_thread();
   if (state) {
     if (!m_backupIndicator)
-      m_backupIndicator = new BackupIndicator;
+      m_backupIndicator = std::make_unique<BackupIndicator>();
     m_backupIndicator->start();
   }
   else {
@@ -682,6 +766,9 @@ void App::updateDisplayTitleBar()
   if (docView) {
     // Prepend the document's filename.
     title += docView->document()->name();
+    if (docView->document()->isReadOnly()) {
+      title += " [Read-Only]";
+    }
     title += " - ";
   }
 
@@ -758,5 +845,17 @@ int app_get_color_to_clear_layer(Layer* layer)
 
   return color_utils::color_for_layer(color, layer);
 }
+
+#ifdef ENABLE_DRM
+void app_configure_drm() {
+  ResourceFinder userDirRf, dataDirRf;
+  userDirRf.includeUserDir("");
+  dataDirRf.includeDataDir("");
+  std::map<std::string, std::string> config = {
+    {"data", dataDirRf.getFirstOrCreateDefault()}
+  };
+  DRM_CONFIGURE(get_app_url(), get_app_name(), get_app_version(), userDirRf.getFirstOrCreateDefault(), updater::getUserAgent(), config);
+}
+#endif
 
 } // namespace app

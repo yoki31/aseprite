@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2021  Igara Studio S.A.
+// Copyright (C) 2021-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -67,7 +67,7 @@ bool ZoomingState::onMouseUp(Editor* editor, MouseMessage* msg)
 bool ZoomingState::onMouseMove(Editor* editor, MouseMessage* msg)
 {
   gfx::Point pt = (msg->position() - m_startPos);
-  int threshold = 8 * guiscale() * editor->manager()->display()->scale();
+  int threshold = 8 * guiscale() * editor->display()->nativeWindow()->scale();
 
   if (m_moved || std::sqrt(pt.x*pt.x + pt.y*pt.y) > threshold) {
     m_moved = true;
@@ -83,8 +83,9 @@ bool ZoomingState::onMouseMove(Editor* editor, MouseMessage* msg)
 
 bool ZoomingState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
 {
+  auto theme = skin::SkinTheme::get(editor);
   editor->showMouseCursor(
-    kCustomCursor, skin::SkinTheme::instance()->cursors.magnifier());
+    kCustomCursor, theme->cursors.magnifier());
   return true;
 }
 

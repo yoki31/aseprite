@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -19,7 +19,6 @@
 #include "app/crash/data_recovery.h"
 #include "app/doc.h"
 #include "app/ini_file.h"
-#include "app/modules/editors.h"
 #include "app/modules/gfx.h"
 #include "app/modules/gui.h"
 #include "app/modules/palettes.h"
@@ -37,12 +36,12 @@
 #include "app/ui/toolbar.h"
 #include "app/ui_context.h"
 #include "app/util/open_batch.h"
-#include "base/clamp.h"
 #include "base/fs.h"
 #include "base/memory.h"
 #include "base/string.h"
 #include "doc/sprite.h"
 #include "os/error.h"
+#include "os/screen.h"
 #include "os/surface.h"
 #include "os/system.h"
 #include "os/window.h"
@@ -54,12 +53,12 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <list>
 #include <vector>
 
-#if defined(_DEBUG) && defined(ENABLE_DATA_RECOVERY)
-#include "app/crash/data_recovery.h"
-#include "app/modules/editors.h"
+#if defined(ENABLE_DEVMODE) && defined(ENABLE_DATA_RECOVERY)
+  #include "app/crash/data_recovery.h"
 #endif
 
 namespace app {
@@ -81,8 +80,8 @@ static struct {
 
 //////////////////////////////////////////////////////////////////////
 
-class CustomizedGuiManager : public Manager
-                           , public LayoutIO {
+class CustomizedGuiManager : public ui::Manager
+                           , public ui::LayoutIO {
 public:
   CustomizedGuiManager(const os::WindowRef& nativeWindow)
     : ui::Manager(nativeWindow) {
@@ -95,11 +94,14 @@ protected:
 #endif
   void onInitTheme(InitThemeEvent& ev) override;
   LayoutIO* onGetLayoutIO() override { return this; }
-  void onNewDisplayConfiguration() override;
+  void onNewDisplayConfiguration(Display* display) override;
 
   // LayoutIO implementation
   std::string loadLayout(Widget* widget) override;
   void saveLayout(Widget* widget, const std::string& str) override;
+
+private:
+  bool processKey(Message* msg);
 };
 
 static os::WindowRef main_window = nullptr;
@@ -130,7 +132,7 @@ static bool create_main_window(bool gpuAccel,
   try {
     if (!spec.frame().isEmpty() ||
         !spec.contentRect().isEmpty()) {
-      spec.scale(scale == 0 ? 2: base::clamp(scale, 1, 4));
+      spec.scale(scale == 0 ? 2: std::clamp(scale, 1, 4));
       main_window = os::instance()->makeWindow(spec);
     }
   }
@@ -178,11 +180,10 @@ int init_module_gui()
   bool gpuAccel = pref.general.gpuAcceleration();
 
   if (!create_main_window(gpuAccel, maximized, lastError)) {
-    // If we've created the display with hardware acceleration,
+    // If we've created the native window with hardware acceleration,
     // now we try to do it without hardware acceleration.
     if (gpuAccel &&
-        (int(os::instance()->capabilities()) &
-         int(os::Capabilities::GpuAccelerationSwitch)) == int(os::Capabilities::GpuAccelerationSwitch)) {
+        os::instance()->hasCapability(os::Capabilities::GpuAccelerationSwitch)) {
       if (create_main_window(false, maximized, lastError)) {
         // Disable hardware acceleration
         pref.general.gpuAcceleration(false);
@@ -192,7 +193,7 @@ int init_module_gui()
 
   if (!main_window) {
     os::error_message(
-      ("Unable to create a user-interface display.\nDetails: "+lastError+"\n").c_str());
+      ("Unable to create a user-interface window.\nDetails: "+lastError+"\n").c_str());
     return -1;
   }
 
@@ -210,7 +211,13 @@ int init_module_gui()
   // messages, and flip the window.
   os::instance()->handleWindowResize =
     [](os::Window* window) {
+      Display* display = Manager::getDisplayFromNativeWindow(window);
+      if (!display)
+        display = manager->display();
+      ASSERT(display);
+
       Message* msg = new Message(kResizeDisplayMessage);
+      msg->setDisplay(display);
       msg->setRecipient(manager);
       msg->setPropagateToChildren(false);
 
@@ -283,9 +290,15 @@ void update_windows_color_profile_from_preferences()
   // which means that each window should use its monitor color space)
   system->setWindowsColorSpace(osCS);
 
-  // Set the color space of the main window
-  if (manager && manager->display())
-    manager->display()->setColorSpace(osCS);
+  // Set the color space of all windows
+  for (ui::Widget* widget : manager->children()) {
+    ASSERT(widget->type() == ui::kWindowWidget);
+    auto window = static_cast<ui::Window*>(widget);
+    if (window->ownDisplay()) {
+      if (auto display = window->display())
+        display->nativeWindow()->setColorSpace(osCS);
+    }
+  }
 }
 
 static bool load_gui_config(os::WindowSpec& spec, bool& maximized)
@@ -348,12 +361,14 @@ static bool load_gui_config(os::WindowSpec& spec, bool& maximized)
   spec.frame(frame);
 
   maximized = get_config_bool("GfxMode", "Maximized", true);
+
+  ui::set_multiple_displays(Preferences::instance().experimental.multipleWindows());
   return true;
 }
 
 static void save_gui_config()
 {
-  os::Window* window = manager->display();
+  os::Window* window = manager->display()->nativeWindow();
   if (window) {
     const bool maximized = (window->isMaximized() ||
                             window->isFullscreen());
@@ -385,34 +400,66 @@ void update_screen_for_document(const Doc* document)
   }
 }
 
-void load_window_pos(Widget* window, const char* section,
+void load_window_pos(Window* window, const char* section,
                      const bool limitMinSize)
 {
+  Display* parentDisplay =
+    (window->display() ? window->display():
+                         window->manager()->display());
+  Rect workarea =
+    (get_multiple_displays() ?
+     parentDisplay->nativeWindow()->screen()->workarea():
+     parentDisplay->bounds());
+
   // Default position
-  Rect orig_pos = window->bounds();
-  Rect pos = orig_pos;
+  Rect origPos = window->bounds();
 
   // Load configurated position
-  pos = get_config_rect(section, "WindowPos", pos);
+  Rect pos = get_config_rect(section, "WindowPos", origPos);
 
   if (limitMinSize) {
-    pos.w = base::clamp(pos.w, orig_pos.w, ui::display_w());
-    pos.h = base::clamp(pos.h, orig_pos.h, ui::display_h());
+    pos.w = std::clamp(pos.w, origPos.w, workarea.w);
+    pos.h = std::clamp(pos.h, origPos.h, workarea.h);
   }
   else {
-    pos.w = std::min(pos.w, ui::display_w());
-    pos.h = std::min(pos.h, ui::display_h());
+    pos.w = std::min(pos.w, workarea.w);
+    pos.h = std::min(pos.h, workarea.h);
   }
 
-  pos.setOrigin(Point(base::clamp(pos.x, 0, ui::display_w()-pos.w),
-                      base::clamp(pos.y, 0, ui::display_h()-pos.h)));
+  pos.setOrigin(Point(std::clamp(pos.x, workarea.x, workarea.x2()-pos.w),
+                      std::clamp(pos.y, workarea.y, workarea.y2()-pos.h)));
 
   window->setBounds(pos);
+
+  if (get_multiple_displays()) {
+    Rect frame = get_config_rect(section, "WindowFrame", gfx::Rect());
+    if (!frame.isEmpty()) {
+      limit_with_workarea(parentDisplay, frame);
+      window->loadNativeFrame(frame);
+    }
+  }
+  else {
+    del_config_value(section, "WindowFrame");
+  }
 }
 
-void save_window_pos(Widget* window, const char *section)
+void save_window_pos(Window* window, const char* section)
 {
-  set_config_rect(section, "WindowPos", window->bounds());
+  gfx::Rect rc;
+
+  if (!window->lastNativeFrame().isEmpty()) {
+    const os::Window* mainNativeWindow = manager->display()->nativeWindow();
+    rc = window->lastNativeFrame();
+    set_config_rect(section, "WindowFrame", rc);
+    rc.offset(-mainNativeWindow->frame().origin());
+    rc /= mainNativeWindow->scale();
+  }
+  else {
+    del_config_value(section, "WindowFrame");
+    rc = window->bounds();
+  }
+
+  set_config_rect(section, "WindowPos", rc);
 }
 
 // TODO Replace this with new theme styles
@@ -457,16 +504,18 @@ bool CustomizedGuiManager::onProcessMessage(Message* msg)
 
   switch (msg->type()) {
 
-    case kCloseDisplayMessage: {
-      // Exit command is only allowed when the main window is the current
-      // window running.
-      if (getForegroundWindow() == App::instance()->mainWindow()) {
+    case kCloseDisplayMessage:
+      // Only call the exit command/close the app when the the main
+      // display is the closed window in this kCloseDisplayMessage
+      // message and it's the current running foreground window.
+      if (msg->display() == this->display() &&
+          getForegroundWindow() == App::instance()->mainWindow()) {
         // Execute the "Exit" command.
         Command* command = Commands::instance()->byId(CommandId::Exit());
         UIContext::instance()->executeCommandFromMenuOrShortcut(command);
+        return true;
       }
       break;
-    }
 
     case kDropFilesMessage:
       // Files are processed only when the main window is the current
@@ -534,80 +583,9 @@ bool CustomizedGuiManager::onProcessMessage(Message* msg)
       if (Manager::onProcessMessage(msg))
         return true;
 
-      KeyboardShortcuts* keys = KeyboardShortcuts::instance();
-      for (const KeyPtr& key : *keys) {
-        if (key->isPressed(msg, *keys)) {
-          // Cancel menu-bar loops (to close any popup menu)
-          App::instance()->mainWindow()->getMenuBar()->cancelMenuLoop();
+      if (processKey(msg))
+        return true;
 
-          switch (key->type()) {
-
-            case KeyType::Tool: {
-              tools::Tool* current_tool = App::instance()->activeTool();
-              tools::Tool* select_this_tool = key->tool();
-              tools::ToolBox* toolbox = App::instance()->toolBox();
-              std::vector<tools::Tool*> possibles;
-
-              // Collect all tools with the pressed keyboard-shortcut
-              for (tools::Tool* tool : *toolbox) {
-                const KeyPtr key = KeyboardShortcuts::instance()->tool(tool);
-                if (key && key->isPressed(msg, *keys))
-                  possibles.push_back(tool);
-              }
-
-              if (possibles.size() >= 2) {
-                bool done = false;
-
-                for (size_t i=0; i<possibles.size(); ++i) {
-                  if (possibles[i] != current_tool &&
-                      ToolBar::instance()->isToolVisible(possibles[i])) {
-                    select_this_tool = possibles[i];
-                    done = true;
-                    break;
-                  }
-                }
-
-                if (!done) {
-                  for (size_t i=0; i<possibles.size(); ++i) {
-                    // If one of the possibilities is the current tool
-                    if (possibles[i] == current_tool) {
-                      // We select the next tool in the possibilities
-                      select_this_tool = possibles[(i+1) % possibles.size()];
-                      break;
-                    }
-                  }
-                }
-              }
-
-              ToolBar::instance()->selectTool(select_this_tool);
-              return true;
-            }
-
-            case KeyType::Command: {
-              Command* command = key->command();
-
-              // Commands are executed only when the main window is
-              // the current window running.
-              if (getForegroundWindow() == App::instance()->mainWindow()) {
-                // OK, so we can execute the command represented
-                // by the pressed-key in the message...
-                UIContext::instance()->executeCommandFromMenuOrShortcut(
-                  command, key->params());
-                return true;
-              }
-              break;
-            }
-
-            case KeyType::Quicktool: {
-              // Do nothing, it is used in the editor through the
-              // KeyboardShortcuts::getCurrentQuicktool() function.
-              break;
-            }
-
-          }
-          break;
-        }
-      }
       break;
     }
 
@@ -636,11 +614,11 @@ bool CustomizedGuiManager::onProcessDevModeKeyDown(KeyMessage* msg)
     return true; // This line should not be executed anyway
   }
 
-  // F1 switches screen/UI scaling
+  // Ctrl+F1 switches screen/UI scaling
   if (msg->ctrlPressed() &&
       msg->scancode() == kKeyF1) {
     try {
-      os::Window* window = display();
+      os::Window* window = display()->nativeWindow();
       int screenScale = window->scale();
       int uiScale = ui::guiscale();
 
@@ -688,17 +666,18 @@ bool CustomizedGuiManager::onProcessDevModeKeyDown(KeyMessage* msg)
 
 #ifdef ENABLE_DATA_RECOVERY
   // Ctrl+Shift+R recover active sprite from the backup store
+  auto editor = Editor::activeEditor();
   if (msg->ctrlPressed() &&
       msg->shiftPressed() &&
       msg->scancode() == kKeyR &&
       App::instance()->dataRecovery() &&
       App::instance()->dataRecovery()->activeSession() &&
-      current_editor &&
-      current_editor->document()) {
+      editor &&
+      editor->document()) {
     Doc* doc = App::instance()
       ->dataRecovery()
       ->activeSession()
-      ->restoreBackupById(current_editor->document()->id(), nullptr);
+      ->restoreBackupById(editor->document()->id(), nullptr);
     if (doc)
       UIContext::instance()->documents().add(doc);
     return true;
@@ -717,14 +696,105 @@ void CustomizedGuiManager::onInitTheme(InitThemeEvent& ev)
   AppMenus::instance()->initTheme();
 }
 
-void CustomizedGuiManager::onNewDisplayConfiguration()
+void CustomizedGuiManager::onNewDisplayConfiguration(Display* display)
 {
-  Manager::onNewDisplayConfiguration();
-  save_gui_config();
+  Manager::onNewDisplayConfiguration(display);
 
-  // TODO Should we provide a more generic way for all ui::Window to
-  //      detect the ui::Display (or UI Screen Scaling) change?
-  Console::notifyNewDisplayConfiguration();
+  // Only whne the main display/window is modified
+  if (display == this->display()) {
+    save_gui_config();
+
+    // TODO Should we provide a more generic way for all ui::Window to
+    //      detect the os::Window (or UI Screen Scaling) change?
+    Console::notifyNewDisplayConfiguration();
+  }
+}
+
+bool CustomizedGuiManager::processKey(Message* msg)
+{
+  App* app = App::instance();
+  const KeyboardShortcuts* keys = KeyboardShortcuts::instance();
+  const KeyContext contexts[] = {
+    keys->getCurrentKeyContext(),
+    KeyContext::Normal
+  };
+  int n = (contexts[0] != contexts[1] ? 2: 1);
+  for (int i = 0; i < n; ++i) {
+    for (const KeyPtr& key : *keys) {
+      if (key->isPressed(msg, *keys, contexts[i])) {
+        // Cancel menu-bar loops (to close any popup menu)
+        app->mainWindow()->getMenuBar()->cancelMenuLoop();
+
+        switch (key->type()) {
+
+          case KeyType::Tool: {
+            tools::Tool* current_tool = app->activeTool();
+            tools::Tool* select_this_tool = key->tool();
+            tools::ToolBox* toolbox = app->toolBox();
+            std::vector<tools::Tool*> possibles;
+
+            // Collect all tools with the pressed keyboard-shortcut
+            for (tools::Tool* tool : *toolbox) {
+              const KeyPtr key = keys->tool(tool);
+              if (key && key->isPressed(msg, *keys))
+                possibles.push_back(tool);
+            }
+
+            if (possibles.size() >= 2) {
+              bool done = false;
+
+              for (size_t i=0; i<possibles.size(); ++i) {
+                if (possibles[i] != current_tool &&
+                    ToolBar::instance()->isToolVisible(possibles[i])) {
+                  select_this_tool = possibles[i];
+                  done = true;
+                  break;
+                }
+              }
+
+              if (!done) {
+                for (size_t i=0; i<possibles.size(); ++i) {
+                  // If one of the possibilities is the current tool
+                  if (possibles[i] == current_tool) {
+                    // We select the next tool in the possibilities
+                    select_this_tool = possibles[(i+1) % possibles.size()];
+                    break;
+                  }
+                }
+              }
+            }
+
+            ToolBar::instance()->selectTool(select_this_tool);
+            return true;
+          }
+
+          case KeyType::Command: {
+            Command* command = key->command();
+
+            // Commands are executed only when the main window is
+            // the current window running.
+            if (getForegroundWindow() == app->mainWindow()) {
+              // OK, so we can execute the command represented
+              // by the pressed-key in the message...
+              UIContext::instance()->executeCommandFromMenuOrShortcut(
+                command, key->params());
+              return true;
+            }
+            break;
+          }
+
+          case KeyType::Quicktool: {
+            // Do nothing, it is used in the editor through the
+            // KeyboardShortcuts::getCurrentQuicktool() function.
+            break;
+          }
+
+        }
+        break;
+      }
+    }
+  }
+  return false;
 }
 
 std::string CustomizedGuiManager::loadLayout(Widget* widget)

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2018  David Capello
 //
 // This program is distributed under the terms of
@@ -13,26 +13,36 @@
 #include "app/color.h"
 #include "app/color_utils.h"
 #include "app/file_selector.h"
+#include "app/script/canvas_widget.h"
 #include "app/script/engine.h"
+#include "app/script/graphics_context.h"
+#include "app/script/keys.h"
 #include "app/script/luacpp.h"
 #include "app/ui/color_button.h"
 #include "app/ui/color_shades.h"
 #include "app/ui/expr_entry.h"
 #include "app/ui/filename_field.h"
+#include "app/ui/main_window.h"
 #include "base/paths.h"
 #include "base/remove_from_container.h"
 #include "ui/box.h"
 #include "ui/button.h"
 #include "ui/combobox.h"
+#include "ui/display.h"
 #include "ui/entry.h"
 #include "ui/grid.h"
 #include "ui/label.h"
 #include "ui/manager.h"
+#include "ui/menu.h"
+#include "ui/message.h"
+#include "ui/scale.h"
 #include "ui/separator.h"
 #include "ui/slider.h"
+#include "ui/system.h"
 #include "ui/window.h"
 
 #include <map>
+#include <stack>
 #include <string>
 #include <vector>
 
@@ -52,10 +62,10 @@ std::vector<Dialog*> all_dialogs;
 
 struct Dialog {
   ui::Window window;
-  ui::VBox vbox;
   ui::Grid grid;
   ui::HBox* hbox = nullptr;
   bool autoNewRow = false;
+  WidgetsList mainWidgets;
   std::map<std::string, ui::Widget*> dataWidgets;
   std::map<std::string, ui::Widget*> labelWidgets;
   int currentRadioGroup = 0;
@@ -74,8 +84,9 @@ struct Dialog {
   int showRef = LUA_REFNIL;
   lua_State* L = nullptr;
 
-  Dialog()
-    : window(ui::Window::WithTitleBar, "Script"),
+  Dialog(const ui::Window::Type windowType,
+         const std::string& title)
+    : window(windowType, title),
       grid(2, false) {
     window.addChild(&grid);
     all_dialogs.push_back(this);
@@ -131,6 +142,46 @@ struct Dialog {
     auto it = labelWidgets.find(id);
     if (it != labelWidgets.end())
       it->second->setText(text);
+  }
+
+  Display* parentDisplay() const {
+    Display* parentDisplay = window.parentDisplay();
+    if (!parentDisplay) {
+      const auto mainWindow = App::instance()->mainWindow();
+      parentDisplay = mainWindow->display();
+    }
+    return parentDisplay;
+  }
+
+  gfx::Rect getWindowBounds() const {
+    gfx::Rect bounds = window.bounds();
+    // Bounds in scripts will be relative to the parent window
+    // origin/scale (or main window if a parent window wasn't specified).
+    if (window.ownDisplay()) {
+      const Display* parentDisplay = this->parentDisplay();
+      const int scale = parentDisplay->scale();
+      const gfx::Point dialogOrigin = window.display()->nativeWindow()->contentRect().origin();
+      const gfx::Point mainOrigin = parentDisplay->nativeWindow()->contentRect().origin();
+      bounds.setOrigin((dialogOrigin - mainOrigin) / scale);
+    }
+    return bounds;
+  }
+
+  void setWindowBounds(const gfx::Rect& rc) {
+    if (window.ownDisplay()) {
+      window.expandWindow(rc.size());
+
+      Display* parentDisplay = this->parentDisplay();
+      const int scale = parentDisplay->scale();
+      const gfx::Point mainOrigin = parentDisplay->nativeWindow()->contentRect().origin();
+      gfx::Rect frame = window.display()->nativeWindow()->contentRect();
+      frame.setOrigin(mainOrigin + rc.origin() * scale);
+      window.display()->nativeWindow()->setFrame(frame);
+    }
+    else {
+      window.setBounds(rc);
+      window.invalidate();
+    }
   }
 
 };
@@ -201,7 +252,29 @@ void Dialog_connect_signal(lua_State* L,
 
 int Dialog_new(lua_State* L)
 {
-  auto dlg = push_new<Dialog>(L);
+  // If we don't have UI, just return nil
+  if (!App::instance()->isGui())
+    return 0;
+
+  // Get the title and the type of window (with or without title bar)
+  ui::Window::Type windowType = ui::Window::WithTitleBar;
+  std::string title = "Script";
+  if (lua_isstring(L, 1)) {
+    title = lua_tostring(L, 1);
+  }
+  else if (lua_istable(L, 1)) {
+    int type = lua_getfield(L, 1, "title");
+    if (type != LUA_TNIL)
+      title = lua_tostring(L, -1);
+    lua_pop(L, 1);
+
+    type = lua_getfield(L, 1, "notitlebar");
+    if (type != LUA_TNIL && lua_toboolean(L, -1))
+      windowType = ui::Window::WithoutTitleBar;
+    lua_pop(L, 1);
+  }
+
+  auto dlg = push_new<Dialog>(L, windowType, title);
 
   // The uservalue of the dialog userdata will contain a table that
   // stores all the callbacks to handle events. As these callbacks can
@@ -212,13 +285,12 @@ int Dialog_new(lua_State* L)
   lua_newtable(L);
   lua_setuservalue(L, -2);
 
-  if (lua_isstring(L, 1)) {
-    dlg->window.setText(lua_tostring(L, 1));
-  }
-  else if (lua_istable(L, 1)) {
-    int type = lua_getfield(L, 1, "title");
-    if (type != LUA_TNIL)
-      dlg->window.setText(lua_tostring(L, -1));
+  if (lua_istable(L, 1)) {
+    int type = lua_getfield(L, 1, "parent");
+    if (type != LUA_TNIL) {
+      if (auto parentDlg = may_get_obj<Dialog>(L, -1))
+        dlg->window.setParentDisplay(parentDlg->window.display());
+    }
     lua_pop(L, 1);
 
     type = lua_getfield(L, 1, "onclose");
@@ -255,6 +327,7 @@ int Dialog_show(lua_State* L)
   dlg->refShow(L);
 
   bool wait = true;
+  obs::scoped_connection conn;
   if (lua_istable(L, 2)) {
     int type = lua_getfield(L, 2, "wait");
     if (type == LUA_TBOOLEAN)
@@ -265,8 +338,9 @@ int Dialog_show(lua_State* L)
     if (VALID_LUATYPE(type)) {
       const auto rc = convert_args_into_rect(L, -1);
       if (!rc.isEmpty()) {
-        dlg->window.remapWindow();
-        dlg->window.setBounds(rc);
+        conn = dlg->window.Open.connect([dlg, rc]{
+          dlg->setWindowBounds(rc);
+        });
       }
     }
     lua_pop(L, 1);
@@ -276,6 +350,54 @@ int Dialog_show(lua_State* L)
     dlg->window.openWindowInForeground();
   else
     dlg->window.openWindow();
+
+  lua_pushvalue(L, 1);
+  return 1;
+}
+
+namespace {
+  class MoveChildren {
+  public:
+    MoveChildren(Dialog* dlg, Widget* to)
+      : m_dlg(dlg)
+      , m_to(to) {
+      for (auto child : m_dlg->mainWidgets) {
+        m_oldParents[child] = child->parent();
+        m_to->addChild(child);
+      }
+    }
+    ~MoveChildren() {
+      for (auto child : m_dlg->mainWidgets)
+        m_oldParents[child]->addChild(child);
+    }
+  private:
+    Dialog* m_dlg;
+    Widget* m_to;
+    std::map<Widget*, Widget*> m_oldParents;
+  };
+}
+
+int Dialog_showMenu(lua_State* L)
+{
+  auto dlg = get_obj<Dialog>(L, 1);
+  Menu popup;
+  MoveChildren moveChildren(dlg, &popup);
+
+  // By default show the menu in the mouse position
+  gfx::Point pt =
+    dlg->parentDisplay()->nativeWindow()
+    ->pointFromScreen(ui::get_mouse_position());
+
+  if (lua_istable(L, 2)) {
+    if (lua_getfield(L, 2, "position") != LUA_TNIL) {
+      pt = convert_args_into_point(L, -1);
+    }
+    lua_pop(L, 1);
+  }
+
+  dlg->refShow(L);
+  popup.showPopup(pt, dlg->parentDisplay());
+  dlg->unrefShow();
 
   lua_pushvalue(L, 1);
   return 1;
@@ -295,6 +417,9 @@ int Dialog_add_widget(lua_State* L, Widget* widget)
   const char* label = nullptr;
   std::string id;
   bool visible = true;
+  bool hexpand = true;
+  // Canvas is vertically expansive by default too
+  bool vexpand = (widget->type() == Canvas::Type());
 
   // This is to separate different kind of widgets without label in
   // different rows.
@@ -341,6 +466,16 @@ int Dialog_add_widget(lua_State* L, Widget* widget)
       widget->setVisible(visible);
     }
     lua_pop(L, 1);
+
+    // Expand horizontally/vertically, it allows to indicate that a
+    // specific widget is not expansive (e.g. a canvas with a fixed
+    // size)
+    type = lua_getfield(L, 2, "hexpand");
+    if (type != LUA_TNIL) hexpand = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    type = lua_getfield(L, 2, "vexpand");
+    if (type != LUA_TNIL) vexpand = lua_toboolean(L, -1);
+    lua_pop(L, 1);
   }
 
   if (label || !dlg->hbox) {
@@ -359,11 +494,16 @@ int Dialog_add_widget(lua_State* L, Widget* widget)
     auto hbox = new ui::HBox;
     if (widget->type() == ui::kButtonWidget)
       hbox->enableFlags(ui::HOMOGENEOUS);
-    dlg->grid.addChildInCell(hbox, 1, 1, ui::HORIZONTAL | ui::TOP);
+
+    dlg->grid.addChildInCell(
+      hbox, 1, 1,
+      ui::HORIZONTAL | (vexpand ? ui::VERTICAL: ui::TOP));
+
     dlg->hbox = hbox;
   }
 
-  widget->setExpansive(true);
+  dlg->mainWidgets.push_back(widget);
+  widget->setExpansive(hexpand);
   dlg->hbox->addChild(widget);
 
   lua_pushvalue(L, 1);
@@ -419,6 +559,7 @@ int Dialog_separator(lua_State* L)
     dlg->dataWidgets[id] = widget;
   }
 
+  dlg->mainWidgets.push_back(widget);
   dlg->grid.addChildInCell(widget, 2, 1, ui::HORIZONTAL | ui::TOP);
   dlg->hbox = nullptr;
 
@@ -445,6 +586,8 @@ int Dialog_label(lua_State* L)
 template<typename T>
 int Dialog_button_base(lua_State* L, T** outputWidget = nullptr)
 {
+  auto dlg = get_obj<Dialog>(L, 1);
+
   std::string text;
   if (lua_istable(L, 2)) {
     int type = lua_getfield(L, 2, "text");
@@ -471,20 +614,27 @@ int Dialog_button_base(lua_State* L, T** outputWidget = nullptr)
 
     type = lua_getfield(L, 2, "onclick");
     if (type == LUA_TFUNCTION) {
-      auto dlg = get_obj<Dialog>(L, 1);
       Dialog_connect_signal(
         L, 1, widget->Click,
-        [dlg, widget](lua_State* L, Event&){
-          if (widget->type() == ui::kButtonWidget)
-            dlg->lastButton = widget;
+        [](lua_State*){
+          // Do nothing
         });
       closeWindowByDefault = false;
     }
     lua_pop(L, 1);
   }
 
-  if (closeWindowByDefault)
-    widget->Click.connect([widget](ui::Event&){ widget->closeWindow(); });
+  if (closeWindowByDefault) {
+    widget->Click.connect([widget](){
+      widget->closeWindow();
+    });
+  }
+  if (widget->type() == ui::kButtonWidget ||
+      widget->type() == ui::kMenuItemWidget) {
+    widget->Click.connect([dlg, widget](){
+      dlg->lastButton = widget;
+    });
+  }
 
   return Dialog_add_widget(L, widget);
 }
@@ -522,6 +672,11 @@ int Dialog_radio(lua_State* L)
     radio->setRadioGroup(dlg->currentRadioGroup);
   }
   return res;
+}
+
+int Dialog_menuItem(lua_State* L)
+{
+  return Dialog_button_base<ui::MenuItem>(L);
 }
 
 int Dialog_entry(lua_State* L)
@@ -833,6 +988,206 @@ int Dialog_file(lua_State* L)
   return Dialog_add_widget(L, widget);
 }
 
+// Auxiliary callbacks used in Canvas events
+static void fill_message_values(lua_State* L, const ui::Message* msg)
+{
+  // Key modifiers
+  lua_pushboolean(L, msg->modifiers() & ui::kKeyAltModifier);
+  lua_setfield(L, -2, "altKey");
+
+  lua_pushboolean(L, msg->modifiers() & (ui::kKeyCmdModifier | ui::kKeyWinModifier));
+  lua_setfield(L, -2, "metaKey");
+
+  lua_pushboolean(L, msg->modifiers() & ui::kKeyCtrlModifier);
+  lua_setfield(L, -2, "ctrlKey");
+
+  lua_pushboolean(L, msg->modifiers() & ui::kKeyShiftModifier);
+  lua_setfield(L, -2, "shiftKey");
+
+  lua_pushboolean(L, msg->modifiers() & ui::kKeySpaceModifier);
+  lua_setfield(L, -2, "spaceKey");
+}
+
+static void fill_keymessage_values(lua_State* L, const ui::KeyMessage* msg)
+{
+  ASSERT(msg->recipient());
+  if (!msg->recipient())
+    return;
+
+  fill_message_values(L, msg);
+
+  // KeyMessage specifics
+  lua_pushinteger(L, msg->repeat());
+  lua_setfield(L, -2, "repeat"); // Only for backward compatibility, remove this in a future
+
+  lua_pushinteger(L, msg->repeat());
+  lua_setfield(L, -2, "repeatCount");
+
+  // TODO improve this (create an Event metatable)
+  lua_pushcfunction(L, [](lua_State*) -> int {
+    Canvas::stopKeyEventPropagation();
+    return 0;
+  });
+  lua_setfield(L, -2, "stopPropagation");
+
+  std::wstring keyString(1, (wchar_t)msg->unicodeChar());
+  lua_pushstring(L, base::to_utf8(keyString).c_str());
+  lua_setfield(L, -2, "key");
+
+  lua_pushstring(L, vkcode_to_code(msg->scancode()));
+  lua_setfield(L, -2, "code");
+}
+
+static void fill_mousemessage_values(lua_State* L, const ui::MouseMessage* msg)
+{
+  ASSERT(msg->recipient());
+  if (!msg->recipient())
+    return;
+
+  fill_message_values(L, msg);
+
+  lua_pushinteger(L, msg->position().x - msg->recipient()->bounds().x);
+  lua_setfield(L, -2, "x");
+
+  lua_pushinteger(L, msg->position().y - msg->recipient()->bounds().y);
+  lua_setfield(L, -2, "y");
+
+  lua_pushinteger(L, int(msg->button()));
+  lua_setfield(L, -2, "button");
+
+  lua_pushnumber(L, msg->pressure());
+  lua_setfield(L, -2, "pressure");
+
+  if (msg->type() == kMouseWheelMessage) {
+    lua_pushnumber(L, msg->wheelDelta().x);
+    lua_setfield(L, -2, "deltaX");
+
+    lua_pushnumber(L, msg->wheelDelta().y);
+    lua_setfield(L, -2, "deltaY");
+  }
+}
+
+static void fill_touchmessage_values(lua_State* L, const ui::TouchMessage* msg)
+{
+  ASSERT(msg->recipient());
+  if (!msg->recipient())
+    return;
+
+  fill_message_values(L, msg);
+
+  lua_pushinteger(L, msg->position().x - msg->recipient()->bounds().x);
+  lua_setfield(L, -2, "x");
+
+  lua_pushinteger(L, msg->position().y - msg->recipient()->bounds().y);
+  lua_setfield(L, -2, "y");
+
+  lua_pushnumber(L, msg->magnification());
+  lua_setfield(L, -2, "magnification");
+}
+
+int Dialog_canvas(lua_State* L)
+{
+  auto widget = new Canvas;
+
+  if (lua_istable(L, 2)) {
+    gfx::Size sz(0, 0);
+
+    int type = lua_getfield(L, 2, "width");
+    if (type != LUA_TNIL) {
+      sz.w = lua_tointegerx(L, -1, nullptr);
+    }
+    lua_pop(L, 1);
+
+    type = lua_getfield(L, 2, "height");
+    if (type != LUA_TNIL) {
+      sz.h = lua_tointegerx(L, -1, nullptr);
+    }
+    lua_pop(L, 1);
+
+    type = lua_getfield(L, 2, "autoScaling");
+    if (type != LUA_TNIL) {
+      widget->setAutoScaling(lua_toboolean(L, -1));
+    }
+    lua_pop(L, 1);
+
+    if (widget->isAutoScaling())
+      sz *= ui::guiscale();
+
+    widget->setSizeHint(sz);
+
+    bool handleKeyEvents = false;
+    if (lua_istable(L, 2)) {
+      int type = lua_getfield(L, 2, "onpaint");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(
+          L, 1, widget->Paint,
+          [](lua_State* L, GraphicsContext& gc) {
+            push_new<GraphicsContext>(L, std::move(gc));
+            lua_setfield(L, -2, "context");
+          });
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "onkeydown");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->KeyDown, fill_keymessage_values);
+        handleKeyEvents = true;
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "onkeyup");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->KeyUp, fill_keymessage_values);
+        handleKeyEvents = true;
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "onmousemove");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->MouseMove, fill_mousemessage_values);
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "onmousedown");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->MouseDown, fill_mousemessage_values);
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "onmouseup");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->MouseUp, fill_mousemessage_values);
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "ondblclick");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->DoubleClick, fill_mousemessage_values);
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "onwheel");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->Wheel, fill_mousemessage_values);
+      }
+      lua_pop(L, 1);
+
+      type = lua_getfield(L, 2, "ontouchmagnify");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->TouchMagnify, fill_touchmessage_values);
+      }
+      lua_pop(L, 1);
+    }
+
+    // If this canvas handle keydown/up events, we set it as a focus
+    // stop.
+    if (handleKeyEvents)
+      widget->setFocusStop(true);
+  }
+
+  return Dialog_add_widget(L, widget);
+}
+
 int Dialog_modify(lua_State* L)
 {
   auto dlg = get_obj<Dialog>(L, 1);
@@ -940,6 +1295,29 @@ int Dialog_modify(lua_State* L)
     }
     lua_pop(L, 1);
 
+    // Handling options before option should support
+    // using both or only one of them at the same time
+    type = lua_getfield(L, 2, "options");
+    if (type != LUA_TNIL) {
+      if (lua_istable(L, -1)) {
+        if (auto combobox = dynamic_cast<ui::ComboBox*>(widget)) {
+          combobox->deleteAllItems();
+          lua_pushnil(L);
+          bool empty = true;
+          while (lua_next(L, -2) != 0) {
+            if (auto p = lua_tostring(L, -1)) {
+              combobox->addItem(p);
+              empty = false;
+            }
+            lua_pop(L, 1);
+          }
+          if (empty)
+            combobox->getEntryWidget()->setText("");
+        }
+      }
+    }
+    lua_pop(L, 1);
+
     type = lua_getfield(L, 2, "option");
     if (auto p = lua_tostring(L, -1)) {
       if (auto combobox = dynamic_cast<ui::ComboBox*>(widget)) {
@@ -983,21 +1361,52 @@ int Dialog_modify(lua_State* L)
     }
     lua_pop(L, 1);
 
-    // TODO combobox options? shades mode? file title / open / save / filetypes? on* events?
+    type = lua_getfield(L, 2, "mouseCursor");
+    if (type != LUA_TNIL) {
+      if (auto canvas = dynamic_cast<Canvas*>(widget)) {
+        auto cursor = (ui::CursorType)lua_tointeger(L, -1);
+        canvas->setMouseCursor(cursor);
+      }
+    }
+    lua_pop(L, 1);
 
-    if (relayout) {
+    // TODO shades mode? file title / open / save / filetypes? on* events?
+
+    // Relayout only if the the dialog window is not being resized.
+    // This is due to the possibility of a script calling a method
+    // to modify dialog's properties (which might generate a relayout)
+    // during an ongoing resize event.
+    if (relayout && !dlg->window.isResizing()) {
       dlg->window.layout();
 
-      gfx::Rect origBounds = dlg->window.bounds();
-      gfx::Rect bounds = origBounds;
-      bounds.h = dlg->window.sizeHint().h;
-      dlg->window.setBounds(bounds);
-
-      dlg->window.manager()->invalidateRect(origBounds);
+      gfx::Rect bounds(dlg->window.bounds().w,
+                       dlg->window.sizeHint().h);
+      dlg->window.expandWindow(bounds.size());
     }
   }
   lua_pushvalue(L, 1);
   return 1;
+}
+
+int Dialog_repaint(lua_State* L)
+{
+  auto dlg = get_obj<Dialog>(L, 1);
+  std::stack<ui::Widget*> widgets;
+  widgets.push(&dlg->grid);
+
+  while (!widgets.empty()) {
+    auto child = widgets.top();
+    widgets.pop();
+
+    if (child->type() == Canvas::Type()) {
+      static_cast<Canvas*>(child)->callPaint();
+      child->invalidate();
+    }
+
+    for (auto subchild : child->children())
+      widgets.push(subchild);
+  }
+  return 0;
 }
 
 int Dialog_get_data(lua_State* L)
@@ -1013,6 +1422,7 @@ int Dialog_get_data(lua_State* L)
       case ui::kButtonWidget:
       case ui::kCheckWidget:
       case ui::kRadioWidget:
+      case ui::kMenuItemWidget:
         lua_pushboolean(L, widget->isSelected() ||
                            dlg->window.closer() == widget ||
                            dlg->lastButton == widget);
@@ -1183,7 +1593,8 @@ int Dialog_get_bounds(lua_State* L)
   auto dlg = get_obj<Dialog>(L, 1);
   if (!dlg->window.isVisible())
     dlg->window.remapWindow();
-  push_new<gfx::Rect>(L, dlg->window.bounds());
+
+  push_new<gfx::Rect>(L, dlg->getWindowBounds());
   return 1;
 }
 
@@ -1191,9 +1602,9 @@ int Dialog_set_bounds(lua_State* L)
 {
   auto dlg = get_obj<Dialog>(L, 1);
   const auto rc = get_obj<gfx::Rect>(L, 2);
-  if (*rc != dlg->window.bounds()) {
-    dlg->window.setBounds(*rc);
-    dlg->window.invalidate();
+  if (rc) {
+    if (*rc != dlg->getWindowBounds())
+      dlg->setWindowBounds(*rc);
   }
   return 0;
 }
@@ -1201,6 +1612,7 @@ int Dialog_set_bounds(lua_State* L)
 const luaL_Reg Dialog_methods[] = {
   { "__gc", Dialog_gc },
   { "show", Dialog_show },
+  { "showMenu", Dialog_showMenu },
   { "close", Dialog_close },
   { "newrow", Dialog_newrow },
   { "separator", Dialog_separator },
@@ -1208,6 +1620,7 @@ const luaL_Reg Dialog_methods[] = {
   { "button", Dialog_button },
   { "check", Dialog_check },
   { "radio", Dialog_radio },
+  { "menuItem", Dialog_menuItem },
   { "entry", Dialog_entry },
   { "number", Dialog_number },
   { "slider", Dialog_slider },
@@ -1215,7 +1628,9 @@ const luaL_Reg Dialog_methods[] = {
   { "color", Dialog_color },
   { "shades", Dialog_shades },
   { "file", Dialog_file },
+  { "canvas", Dialog_canvas },
   { "modify", Dialog_modify },
+  { "repaint", Dialog_repaint },
   { nullptr, nullptr }
 };
 

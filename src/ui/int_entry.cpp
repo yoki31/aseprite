@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -11,11 +11,11 @@
 
 #include "ui/int_entry.h"
 
-#include "base/clamp.h"
 #include "base/scoped_value.h"
 #include "gfx/rect.h"
 #include "gfx/region.h"
 #include "os/font.h"
+#include "ui/fit_bounds.h"
 #include "ui/manager.h"
 #include "ui/message.h"
 #include "ui/popup_window.h"
@@ -54,12 +54,12 @@ IntEntry::~IntEntry()
 int IntEntry::getValue() const
 {
   int value = m_slider.convertTextToValue(text());
-  return base::clamp(value, m_min, m_max);
+  return std::clamp(value, m_min, m_max);
 }
 
 void IntEntry::setValue(int value)
 {
-  value = base::clamp(value, m_min, m_max);
+  value = std::clamp(value, m_min, m_max);
 
   setText(m_slider.convertValueToText(value));
 
@@ -75,7 +75,7 @@ bool IntEntry::onProcessMessage(Message* msg)
 
     // Reset value if it's out of bounds when focus is lost
     case kFocusLeaveMessage:
-      setValue(base::clamp(getValue(), m_min, m_max));
+      setValue(std::clamp(getValue(), m_min, m_max));
       deselectText();
       break;
 
@@ -90,16 +90,17 @@ bool IntEntry::onProcessMessage(Message* msg)
     case kMouseMoveMessage:
       if (hasCapture()) {
         MouseMessage* mouseMsg = static_cast<MouseMessage*>(msg);
-        Widget* pick = manager()->pick(mouseMsg->position());
+        Widget* pick = manager()->pickFromScreenPos(
+          display()->nativeWindow()->pointToScreen(mouseMsg->position()));
         if (pick == &m_slider) {
           releaseMouse();
 
           MouseMessage mouseMsg2(kMouseDownMessage,
-                                 mouseMsg->pointerType(),
-                                 mouseMsg->button(),
-                                 mouseMsg->modifiers(),
-                                 mouseMsg->position());
-          m_slider.sendMessage(&mouseMsg2);
+                                 *mouseMsg,
+                                 mouseMsg->positionForDisplay(pick->display()));
+          mouseMsg2.setRecipient(pick);
+          mouseMsg2.setDisplay(pick->display());
+          pick->sendMessage(&mouseMsg2);
         }
       }
       break;
@@ -110,7 +111,7 @@ bool IntEntry::onProcessMessage(Message* msg)
         int newValue = oldValue
           + static_cast<MouseMessage*>(msg)->wheelDelta().x
           - static_cast<MouseMessage*>(msg)->wheelDelta().y;
-        newValue = base::clamp(newValue, m_min, m_max);
+        newValue = std::clamp(newValue, m_min, m_max);
         if (newValue != oldValue) {
           setValue(newValue);
           selectAllText();
@@ -176,24 +177,33 @@ void IntEntry::openPopup()
 {
   m_slider.setValue(getValue());
 
-  m_popupWindow = new TransparentPopupWindow(PopupWindow::ClickBehavior::CloseOnClickInOtherWindow);
+  m_popupWindow = std::make_unique<TransparentPopupWindow>(PopupWindow::ClickBehavior::CloseOnClickInOtherWindow);
   m_popupWindow->setAutoRemap(false);
   m_popupWindow->addChild(&m_slider);
   m_popupWindow->Close.connect(&IntEntry::onPopupClose, this);
 
-  Rect rc = bounds();
-  gfx::Size sz = m_popupWindow->sizeHint();
-  rc.w = 128*guiscale();
-  if (rc.x+rc.w > ui::display_w())
-    rc.x = rc.x-rc.w+bounds().w;
-  if (rc.y+rc.h+sz.h < ui::display_h())
-    rc.y += rc.h;
-  else
-    rc.y -= sz.h;
-  m_popupWindow->setBounds(rc);
+  fit_bounds(
+    display(),
+    m_popupWindow.get(),
+    gfx::Rect(0, 0, 128*guiscale(), m_popupWindow->sizeHint().h),
+    [this](const gfx::Rect& workarea,
+           gfx::Rect& rc,
+           std::function<gfx::Rect(Widget*)> getWidgetBounds) {
+      Rect entryBounds = getWidgetBounds(this);
 
-  Region rgn(rc.createUnion(bounds()));
-  rgn.createUnion(rgn, Region(bounds()));
+      rc.x = entryBounds.x;
+      rc.y = entryBounds.y2();
+
+      if (rc.x2() > workarea.x2())
+        rc.x = rc.x-rc.w+entryBounds.w;
+
+      if (rc.y2() > workarea.y2())
+        rc.y = entryBounds.y-entryBounds.h;
+
+      m_popupWindow->setBounds(rc);
+    });
+
+  Region rgn(m_popupWindow->boundsOnScreen().createUnion(boundsOnScreen()));
   m_popupWindow->setHotRegion(rgn);
 
   m_popupWindow->openWindow();
@@ -205,14 +215,13 @@ void IntEntry::closePopup()
     removeSlider();
 
     m_popupWindow->closeWindow(nullptr);
-    delete m_popupWindow;
-    m_popupWindow = nullptr;
+    m_popupWindow.reset();
   }
 }
 
 void IntEntry::onChangeSlider()
 {
-  base::ScopedValue<bool> lockFlag(m_changeFromSlider, true, false);
+  base::ScopedValue lockFlag(m_changeFromSlider, true);
   setValue(m_slider.getValue());
   selectAllText();
 }
@@ -228,7 +237,7 @@ void IntEntry::onPopupClose(CloseEvent& ev)
 void IntEntry::removeSlider()
 {
   if (m_popupWindow &&
-      m_slider.parent() == m_popupWindow) {
+      m_slider.parent() == m_popupWindow.get()) {
     m_popupWindow->removeChild(&m_slider);
   }
 }

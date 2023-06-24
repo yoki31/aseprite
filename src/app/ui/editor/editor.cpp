@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -12,6 +12,7 @@
 #include "app/ui/editor/editor.h"
 
 #include "app/app.h"
+#include "app/app_menus.h"
 #include "app/color.h"
 #include "app/color_picker.h"
 #include "app/color_utils.h"
@@ -22,11 +23,11 @@
 #include "app/doc_event.h"
 #include "app/i18n/strings.h"
 #include "app/ini_file.h"
-#include "app/modules/editors.h"
 #include "app/modules/gfx.h"
 #include "app/modules/gui.h"
 #include "app/modules/palettes.h"
 #include "app/pref/preferences.h"
+#include "app/snap_to_grid.h"
 #include "app/tools/active_tool.h"
 #include "app/tools/controller.h"
 #include "app/tools/ink.h"
@@ -34,6 +35,7 @@
 #include "app/tools/tool_box.h"
 #include "app/ui/color_bar.h"
 #include "app/ui/context_bar.h"
+#include "app/ui/doc_view.h"
 #include "app/ui/editor/drawing_state.h"
 #include "app/ui/editor/editor_customization_delegate.h"
 #include "app/ui/editor/editor_decorator.h"
@@ -51,18 +53,18 @@
 #include "app/ui/timeline/timeline.h"
 #include "app/ui/toolbar.h"
 #include "app/ui_context.h"
-#include "app/util/conversion_to_surface.h"
 #include "app/util/layer_utils.h"
 #include "base/chrono.h"
-#include "base/clamp.h"
 #include "base/convert_to.h"
 #include "doc/doc.h"
 #include "doc/mask_boundaries.h"
 #include "doc/slice.h"
+#include "fmt/format.h"
 #include "os/color_space.h"
+#include "os/sampling.h"
 #include "os/surface.h"
 #include "os/system.h"
-#include "os/window.h"
+#include "render/rasterize.h"
 #include "ui/ui.h"
 
 #include <algorithm>
@@ -93,6 +95,10 @@ public:
     return m_editor;
   }
 
+  Graphics* getGraphics() override {
+    return m_g;
+  }
+
   void drawLine(gfx::Color color, int x1, int y1, int x2, int y2) override {
     gfx::Point a(x1, y1);
     gfx::Point b(x2, y2);
@@ -106,15 +112,12 @@ public:
     m_g->drawLine(color, a, b);
   }
 
-  void drawRectXor(const gfx::Rect& rc) override {
+  void drawRect(gfx::Color color, const gfx::Rect& rc) override {
     gfx::Rect rc2 = m_editor->editorToScreen(rc);
     gfx::Rect bounds = m_editor->bounds();
     rc2.x -= bounds.x;
     rc2.y -= bounds.y;
-
-    m_g->setDrawMode(Graphics::DrawMode::Xor);
-    m_g->drawRect(gfx::rgba(255, 255, 255), rc2);
-    m_g->setDrawMode(Graphics::DrawMode::Solid);
+    m_g->drawRect(color, rc2);
   }
 
   void fillRect(gfx::Color color, const gfx::Rect& rc) override {
@@ -131,17 +134,21 @@ private:
 };
 
 // static
-EditorRender* Editor::m_renderEngine = nullptr;
+Editor* Editor::m_activeEditor = nullptr;
 
-Editor::Editor(Doc* document, EditorFlags flags)
+// static
+std::unique_ptr<EditorRender> Editor::m_renderEngine = nullptr;
+
+Editor::Editor(Doc* document, EditorFlags flags, EditorStatePtr state)
   : Widget(Editor::Type())
-  , m_state(new StandbyState())
+  , m_state(state == nullptr ? std::make_shared<StandbyState>(): state)
   , m_decorator(NULL)
   , m_document(document)
   , m_sprite(m_document->sprite())
   , m_layer(m_sprite->root()->firstLayer())
   , m_frame(frame_t(0))
   , m_docPref(Preferences::instance().document(document))
+  , m_tiledModeHelper(app::TiledModeHelper(m_docPref.tiled.mode(), m_sprite))
   , m_brushPreview(this)
   , m_toolLoopModifiers(tools::ToolLoopModifiers::kNone)
   , m_padding(0, 0)
@@ -159,7 +166,7 @@ Editor::Editor(Doc* document, EditorFlags flags)
   , m_tagFocusBand(-1)
 {
   if (!m_renderEngine)
-    m_renderEngine = new EditorRender;
+    m_renderEngine = std::make_unique<EditorRender>();
 
   m_proj.setPixelRatio(m_sprite->pixelRatio());
 
@@ -173,6 +180,10 @@ Editor::Editor(Doc* document, EditorFlags flags)
   m_fgColorChangeConn =
     Preferences::instance().colorBar.fgColor.AfterChange.connect(
       [this]{ onFgColorChange(); });
+
+  m_samplingChangeConn =
+    Preferences::instance().editor.downsampling.AfterChange.connect(
+      [this]{ onSamplingChange(); });
 
   m_contextBarBrushChangeConn =
     App::instance()->contextBar()->BrushChange.connect(
@@ -228,15 +239,25 @@ Editor::~Editor()
 void Editor::destroyEditorSharedInternals()
 {
   BrushPreview::destroyInternals();
-  if (m_renderEngine) {
-    delete m_renderEngine;
-    m_renderEngine = nullptr;
-  }
+  if (m_renderEngine)
+    m_renderEngine.reset();
 }
 
-bool Editor::isActive() const
+bool Editor::isUsingNewRenderEngine() const
 {
-  return (current_editor == this);
+  ASSERT(m_sprite);
+  return
+    // TODO add an option to the ShaderRenderer to work as the "old"
+    //      engine (screen pixel by screen pixel) or as the "new"
+    //      engine (sprite pixel by sprite pixel)
+    (m_renderEngine->type() == EditorRender::Type::kShaderRenderer)
+    ||
+    (Preferences::instance().experimental.newRenderEngine()
+     // Reference layers + zoom > 100% need the old render engine for
+     // sub-pixel rendering.
+     && (!m_sprite->hasVisibleReferenceLayers()
+         || (m_proj.scaleX() <= 1.0
+             && m_proj.scaleY() <= 1.0)));
 }
 
 // static
@@ -297,7 +318,7 @@ void Editor::setStateInternal(const EditorStatePtr& newState)
     invalidate();
 
   // Setup the new mouse cursor
-  setCursor(ui::get_mouse_position());
+  setCursor(mousePosInDisplay());
 
   updateStatusBar();
 }
@@ -331,11 +352,30 @@ void Editor::getInvalidDecoratoredRegion(gfx::Region& region)
 
 void Editor::setLayer(const Layer* layer)
 {
-  bool changed = (m_layer != layer);
+  const bool changed = (m_layer != layer);
+  const bool gridVisible = (changed && m_docPref.show.grid());
+
+  doc::Grid oldGrid, newGrid;
+  if (gridVisible)
+    oldGrid = getSite().grid();
 
   m_observers.notifyBeforeLayerChanged(this);
+
+  // Remove extra cel information if we change between different layer
+  // type (e.g. from a tilemap layer to an image layer). This is
+  // useful to avoid a flickering effect in the preview window (using
+  // a non-updated extra cel to patch the new "layer" with the
+  // background of the previous selected "m_layer".
+  if ((layer == nullptr) ||
+      (m_layer != nullptr && m_layer->type() != layer->type())) {
+    m_document->setExtraCel(ExtraCelRef(nullptr));
+  }
+
   m_layer = const_cast<Layer*>(layer);
   m_observers.notifyAfterLayerChanged(this);
+
+  if (gridVisible)
+    newGrid = getSite().grid();
 
   if (m_document && changed) {
     if (// If the onion skinning depends on the active layer
@@ -345,7 +385,11 @@ void Editor::setLayer(const Layer* layer)
         // If there is a different opacity for nonactive-layers
         Preferences::instance().experimental.nonactiveLayersOpacity() < 255 ||
         // If the automatic cel guides are visible...
-        m_showGuidesThisCel) {
+        m_showGuidesThisCel ||
+        // If grid settings changed
+        (gridVisible &&
+         (oldGrid.tileSize() != newGrid.tileSize() ||
+          oldGrid.origin() != newGrid.origin()))) {
       // We've to redraw the whole editor
       invalidate();
     }
@@ -374,7 +418,8 @@ void Editor::setFrame(frame_t frame)
   if (isActive())
     UIContext::instance()->notifyActiveSiteChanged();
 
-  invalidate();
+  // Invalidate canvas area
+  invalidateCanvas();
   updateStatusBar();
 }
 
@@ -384,6 +429,7 @@ void Editor::getSite(Site* site) const
   site->sprite(m_sprite);
   site->layer(m_layer);
   site->frame(m_frame);
+
   if (!m_selectedSlices.empty() &&
       getCurrentEditorInk()->isSlice()) {
     site->selectedSlices(m_selectedSlices);
@@ -395,6 +441,19 @@ void Editor::getSite(Site* site) const
       timeline->isVisible() &&
       timeline->range().enabled()) {
     site->range(timeline->range());
+  }
+
+  if (m_layer && m_layer->isTilemap()) {
+    TilemapMode tilemapMode = site->tilemapMode();
+    TilesetMode tilesetMode = site->tilesetMode();
+    const ColorBar* colorbar = ColorBar::instance();
+    ASSERT(colorbar);
+    if (colorbar) {
+      tilemapMode = colorbar->tilemapMode();
+      tilesetMode = colorbar->tilesetMode();
+    }
+    site->tilemapMode(tilemapMode);
+    site->tilesetMode(tilesetMode);
   }
 }
 
@@ -410,6 +469,9 @@ void Editor::setZoom(const render::Zoom& zoom)
   if (m_proj.zoom() != zoom) {
     m_proj.setZoom(zoom);
     notifyZoomChanged();
+
+    if (isActive())
+      App::instance()->contextBar()->updateSamplingVisibility();
   }
   else {
     // Just copy the zoom as the internal "Zoom::m_internalScale"
@@ -510,7 +572,7 @@ void Editor::setEditorScroll(const gfx::Point& scroll)
 void Editor::setEditorZoom(const render::Zoom& zoom)
 {
   setZoomAndCenterInMouse(
-    zoom, ui::get_mouse_position(),
+    zoom, mousePosInDisplay(),
     Editor::ZoomBehavior::CENTER);
 }
 
@@ -576,19 +638,14 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
 
   const int maxw = std::max(0, m_sprite->width()-expose.x);
   const int maxh = std::max(0, m_sprite->height()-expose.y);
-  expose.w = base::clamp(expose.w, 0, maxw);
-  expose.h = base::clamp(expose.h, 0, maxh);
+  expose.w = std::clamp(expose.w, 0, maxw);
+  expose.h = std::clamp(expose.h, 0, maxh);
   if (expose.isEmpty())
     return;
 
   // rc2 is the rectangle used to create a temporal rendered image of the sprite
-  const bool newEngine =
-    (Preferences::instance().experimental.newRenderEngine()
-     // Reference layers + zoom > 100% need the old render engine for
-     // sub-pixel rendering.
-     && (!m_sprite->hasVisibleReferenceLayers()
-         || (m_proj.scaleX() <= 1.0
-             && m_proj.scaleY() <= 1.0)));
+  const auto& pref = Preferences::instance();
+  const bool newEngine = isUsingNewRenderEngine();
   gfx::Rect rc2;
   if (newEngine) {
     rc2 = expose;               // New engine, exposed rectangle (without zoom)
@@ -603,27 +660,23 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
     dest.h = rc.h;
   }
 
-  std::unique_ptr<Image> rendered(nullptr);
+  // Convert the render to a os::Surface
+  static os::SurfaceRef rendered = nullptr; // TODO move this to other centralized place
+  const auto& renderProperties = m_renderEngine->properties();
   try {
     // Generate a "expose sprite pixels" notification. This is used by
     // tool managers that need to validate this region (copy pixels from
     // the original cel) before it can be used by the RenderEngine.
     m_document->notifyExposeSpritePixels(m_sprite, gfx::Region(expose));
 
-    // Create a temporary RGB bitmap to draw all to it
-    rendered.reset(Image::create(IMAGE_RGB, rc2.w, rc2.h,
-                                 m_renderEngine->getRenderImageBuffer()));
-
-    m_renderEngine->setNewBlendMethod(Preferences::instance().experimental.newBlend());
+    m_renderEngine->setNewBlendMethod(pref.experimental.newBlend());
     m_renderEngine->setRefLayersVisiblity(true);
     m_renderEngine->setSelectedLayer(m_layer);
     if (m_flags & Editor::kUseNonactiveLayersOpacityWhenEnabled)
-      m_renderEngine->setNonactiveLayersOpacity(Preferences::instance().experimental.nonactiveLayersOpacity());
+      m_renderEngine->setNonactiveLayersOpacity(pref.experimental.nonactiveLayersOpacity());
     else
       m_renderEngine->setNonactiveLayersOpacity(255);
-    m_renderEngine->setProjection(
-      newEngine ? render::Projection(): m_proj);
-    m_renderEngine->setupBackground(m_document, rendered->pixelFormat());
+    m_renderEngine->setupBackground(m_document, IMAGE_RGB);
     m_renderEngine->disableOnionskin();
 
     if ((m_flags & kShowOnionskin) == kShowOnionskin) {
@@ -652,7 +705,8 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
     }
 
     ExtraCelRef extraCel = m_document->extraCel();
-    if (extraCel && extraCel->type() != render::ExtraType::NONE) {
+    if (extraCel &&
+        extraCel->type() != render::ExtraType::NONE) {
       m_renderEngine->setExtraImage(
         extraCel->type(),
         extraCel->cel(),
@@ -661,12 +715,38 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
         m_layer, m_frame);
     }
 
+    // Render background first (e.g. new ShaderRenderer will paint the
+    // background on the screen first and then composite the rendered
+    // sprite on it.)
+    if (renderProperties.renderBgOnScreen) {
+      m_renderEngine->setProjection(m_proj);
+      m_renderEngine->renderCheckeredBackground(
+        g->getInternalSurface(),
+        m_sprite,
+        gfx::Clip(dest.x + g->getInternalDeltaX(),
+                  dest.y + g->getInternalDeltaY(),
+                  m_proj.apply(rc2)));
+    }
+
+    // Create a temporary surface to draw the sprite on it
+    if (!rendered ||
+        rendered->width() < rc2.w ||
+        rendered->height() < rc2.h ||
+        rendered->colorSpace() != m_document->osColorSpace()) {
+      const int maxw = std::max(rc2.w, rendered ? rendered->width(): 0);
+      const int maxh = std::max(rc2.h, rendered ? rendered->height(): 0);
+      rendered = os::instance()->makeRgbaSurface(
+        maxw, maxh, m_document->osColorSpace());
+    }
+
+    m_renderEngine->setProjection(
+      newEngine ? render::Projection(): m_proj);
     m_renderEngine->renderSprite(
       rendered.get(), m_sprite, m_frame, gfx::Clip(0, 0, rc2));
 
     m_renderEngine->removeExtraImage();
 
-    // If the checked background is visible in this sprite, we save
+    // If the checkered background is visible in this sprite, we save
     // all settings of the background for this document.
     if (!m_sprite->isOpaque())
       m_docPref.bg.forceSection();
@@ -675,46 +755,42 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
     Console::showException(e);
   }
 
-  if (rendered) {
-    // Convert the render to a os::Surface
-    static os::SurfaceRef tmp = nullptr; // TODO move this to other centralized place
+  if (rendered && rendered->nativeHandle()) {
+    if (newEngine) {
+      os::Sampling sampling;
+      if (m_proj.scaleX() < 1.0) {
+        switch (pref.editor.downsampling()) {
+          case gen::Downsampling::NEAREST:
+            sampling = os::Sampling(os::Sampling::Filter::Nearest);
+            break;
+          case gen::Downsampling::BILINEAR:
+            sampling = os::Sampling(os::Sampling::Filter::Linear);
+            break;
+          case gen::Downsampling::BILINEAR_MIPMAP:
+            sampling = os::Sampling(os::Sampling::Filter::Linear,
+                                    os::Sampling::Mipmap::Nearest);
+            break;
+          case gen::Downsampling::TRILINEAR_MIPMAP:
+            sampling = os::Sampling(os::Sampling::Filter::Linear,
+                                    os::Sampling::Mipmap::Linear);
+            break;
+        }
+      }
 
-    if (!tmp ||
-        tmp->width() < rc2.w ||
-        tmp->height() < rc2.h ||
-        tmp->colorSpace() != m_document->osColorSpace()) {
-      const int maxw = std::max(rc2.w, tmp ? tmp->width(): 0);
-      const int maxh = std::max(rc2.h, tmp ? tmp->height(): 0);
-      tmp = os::instance()->makeSurface(
-        maxw, maxh, m_document->osColorSpace());
+      os::Paint p;
+      if (renderProperties.requiresRgbaBackbuffer)
+        p.blendMode(os::BlendMode::SrcOver);
+      else
+        p.blendMode(os::BlendMode::Src);
+
+      g->drawSurface(rendered.get(),
+                     gfx::Rect(0, 0, rc2.w, rc2.h),
+                     dest,
+                     sampling,
+                     &p);
     }
-
-    if (tmp->nativeHandle()) {
-      if (newEngine) {
-        // Without doing something on the "tmp" surface before (like
-        // just drawing a pixel), we get a strange behavior where
-        // pixels are not updated correctly on the editor (e.g. when
-        // zoom < 100%). I didn't have enough time to investigate this
-        // issue yet, but this is a partial fix/hack.
-        //
-        // TODO review why do we need to do this, it looks like some
-        //      internal state of a SkCanvas or SkBitmap thing is
-        //      updated after this, because convert_image_to_surface()
-        //      will overwrite these pixels anyway.
-        os::Paint paint;
-        paint.color(gfx::rgba(0, 0, 0, 255));
-        tmp->drawRect(gfx::Rect(0, 0, 1, 1), paint);
-      }
-
-      convert_image_to_surface(rendered.get(), m_sprite->palette(m_frame),
-                               tmp.get(), 0, 0, 0, 0, rc2.w, rc2.h);
-
-      if (newEngine) {
-        g->drawSurface(tmp.get(), gfx::Rect(0, 0, rc2.w, rc2.h), dest);
-      }
-      else {
-        g->blit(tmp.get(), 0, 0, dest.x, dest.y, dest.w, dest.h);
-      }
+    else {
+      g->blit(rendered.get(), 0, 0, dest.x, dest.y, dest.w, dest.h);
     }
   }
 
@@ -734,7 +810,7 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
 
         if (m_docPref.pixelGrid.autoOpacity()) {
           alpha = int(alpha * (m_proj.zoom().scale()-2.) / (16.-2.));
-          alpha = base::clamp(alpha, 0, 255);
+          alpha = std::clamp(alpha, 0, 255);
         }
 
         drawGrid(g, enclosingRect, Rect(0, 0, 1, 1),
@@ -747,7 +823,10 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
 
       // Draw the grid
       if (m_docPref.show.grid()) {
-        gfx::Rect gridrc = m_sprite->gridBounds();
+        gfx::Rect gridrc;
+        if (!m_state->getGridBounds(this, gridrc))
+          gridrc = getSite().gridBounds();
+
         if (m_proj.applyX(gridrc.w) > 2 &&
             m_proj.applyY(gridrc.h) > 2) {
           int alpha = m_docPref.grid.opacity();
@@ -756,7 +835,7 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
             double len = (m_proj.applyX(gridrc.w) +
                           m_proj.applyY(gridrc.h)) / 2.;
             alpha = int(alpha * len / 32.);
-            alpha = base::clamp(alpha, 0, 255);
+            alpha = std::clamp(alpha, 0, 255);
           }
 
           if (alpha > 8) {
@@ -778,7 +857,7 @@ void Editor::drawBackground(ui::Graphics* g)
   if (!(m_flags & kShowOutside))
     return;
 
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
 
   gfx::Size canvas = canvasSize();
   gfx::Rect rc(0, 0, canvas.w, canvas.h);
@@ -875,16 +954,21 @@ void Editor::drawSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& _rc)
 
   // Draw active layer/cel edges
   if ((m_docPref.show.layerEdges() || m_showAutoCelGuides) &&
-      // Show layer edges only on "standby" like states where brush
-      // preview is shown (e.g. with this we avoid to showing the
-      // edges in states like DrawingState, etc.).
-      m_state->requireBrushPreview()) {
+      // Show layer edges and possibly cel guides only on states that
+      // allows it (e.g scrolling state)
+      m_state->allowLayerEdges()) {
     Cel* cel = (m_layer ? m_layer->cel(m_frame): nullptr);
     if (cel) {
-      drawCelBounds(
-        g, cel,
-        color_utils::color_for_ui(Preferences::instance().guides.layerEdgesColor()));
+      gfx::Color color = color_utils::color_for_ui(Preferences::instance().guides.layerEdgesColor());
+      drawCelBounds(g, cel, color);
 
+      // Draw tile numbers
+      if (m_docPref.show.tileNumbers() &&
+          cel->layer()->isTilemap()) {
+        drawTileNumbers(g, cel);
+      }
+
+      // Draw auto-guides to other cel
       if (m_showAutoCelGuides &&
           m_showGuidesThisCel != cel) {
         drawCelGuides(g, cel, m_showGuidesThisCel);
@@ -908,7 +992,7 @@ void Editor::drawSpriteClipped(const gfx::Region& updateRegion)
   Region screenRegion;
   getDrawableRegion(screenRegion, kCutTopWindows);
 
-  ScreenGraphics screenGraphics;
+  ScreenGraphics screenGraphics(display());
   GraphicsPtr editorGraphics = getGraphics(clientBounds());
 
   for (const Rect& updateRect : updateRegion) {
@@ -943,15 +1027,14 @@ void Editor::drawMask(Graphics* g)
   auto& segs = m_document->maskBoundaries();
   segs.createPathIfNeeeded();
 
-  CheckedDrawMode checked(g, m_antsOffset,
-                          gfx::rgba(0, 0, 0, 255),
-                          gfx::rgba(255, 255, 255, 255));
-  os::Paint paint;
-  paint.style(os::Paint::Stroke);
-  paint.color(gfx::rgba(0, 0, 0));
+  ui::Paint paint;
+  paint.style(ui::Paint::Stroke);
+  set_checkered_paint_mode(paint, m_antsOffset,
+                           gfx::rgba(0, 0, 0, 255),
+                           gfx::rgba(255, 255, 255, 255));
 
   // We translate the path instead of applying a matrix to the
-  // ui::Graphics so the "checked" pattern is not scaled too.
+  // ui::Graphics so the "checkered" pattern is not scaled too.
   gfx::Path path;
   segs.path().transform(m_proj.scaleMatrix(), &path);
   path.offset(pt.x, pt.y);
@@ -1002,16 +1085,17 @@ void Editor::drawGrid(Graphics* g, const gfx::Rect& spriteBounds, const Rect& gr
   if (grid.y < 0) grid.y += grid.h;
 
   // Convert the "grid" rectangle to screen coordinates
-  grid = editorToScreen(grid);
-  if (grid.w < 1 || grid.h < 1)
+  RectF gridF(grid);
+  gridF = editorToScreenF(gridF);
+  if (gridF.w < 1. || gridF.h < 1.)
     return;
 
   // Adjust for client area
   gfx::Rect bounds = this->bounds();
-  grid.offset(-bounds.origin());
+  gridF.offset(-bounds.origin());
 
-  while (grid.x-grid.w >= spriteBounds.x) grid.x -= grid.w;
-  while (grid.y-grid.h >= spriteBounds.y) grid.y -= grid.h;
+  while (gridF.x-gridF.w >= spriteBounds.x) gridF.x -= gridF.w;
+  while (gridF.y-gridF.h >= spriteBounds.y) gridF.y -= gridF.h;
 
   // Get the grid's color
   gfx::Color grid_color = color_utils::color_for_ui(color);
@@ -1022,18 +1106,18 @@ void Editor::drawGrid(Graphics* g, const gfx::Rect& spriteBounds, const Rect& gr
 
   // Draw horizontal lines
   int x1 = spriteBounds.x;
-  int y1 = grid.y;
+  int y1 = gridF.y;
   int x2 = spriteBounds.x + spriteBounds.w;
   int y2 = spriteBounds.y + spriteBounds.h;
 
-  for (int c=y1; c<=y2; c+=grid.h)
+  for (double c=y1; c<=y2; c+=gridF.h)
     g->drawHLine(grid_color, x1, c, spriteBounds.w);
 
   // Draw vertical lines
-  x1 = grid.x;
+  x1 = gridF.x;
   y1 = spriteBounds.y;
 
-  for (int c=x1; c<=x2; c+=grid.w)
+  for (double c=x1; c<=x2; c+=gridF.w)
     g->drawVLine(grid_color, c, y1, spriteBounds.h);
 }
 
@@ -1045,7 +1129,7 @@ void Editor::drawSlices(ui::Graphics* g)
   if (!isVisible() || !m_document)
     return;
 
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   gfx::Point mainOffset(mainTilePosition());
 
   for (auto slice : m_sprite->slices()) {
@@ -1108,6 +1192,41 @@ void Editor::drawSlices(ui::Graphics* g)
   }
 }
 
+void Editor::drawTileNumbers(ui::Graphics* g, const Cel* cel)
+{
+  gfx::Color color = color_utils::color_for_ui(Preferences::instance().guides.autoGuidesColor());
+  gfx::Color fgColor = color_utils::blackandwhite_neg(color);
+
+  const doc::Grid grid = getSite().grid();
+  const gfx::Size tileSize = editorToScreen(grid.tileToCanvas(gfx::Rect(0, 0, 1, 1))).size();
+  if (tileSize.h > g->font()->height()) {
+    const gfx::Point offset =
+      gfx::Point(tileSize.w/2,
+                 tileSize.h/2 - g->font()->height()/2)
+      + mainTilePosition();
+
+    int ti_offset =
+      static_cast<LayerTilemap*>(cel->layer())->tileset()->baseIndex() - 1;
+
+    const doc::Image* image = cel->image();
+    std::string text;
+    for (int y=0; y<image->height(); ++y) {
+      for (int x=0; x<image->width(); ++x) {
+        doc::tile_t t = image->getPixel(x, y);
+        if (t != doc::notile) {
+          gfx::Point pt = editorToScreen(grid.tileToCanvas(gfx::Point(x, y)));
+          pt -= bounds().origin();
+          pt += offset;
+
+          text = fmt::format("{}", int(t & doc::tile_i_mask) + ti_offset);
+          pt.x -= g->measureUIText(text).w/2;
+          g->drawText(text, fgColor, color, pt);
+        }
+      }
+    }
+  }
+}
+
 void Editor::drawCelBounds(ui::Graphics* g, const Cel* cel, const gfx::Color color)
 {
   g->drawRect(color, getCelScreenBounds(cel));
@@ -1123,9 +1242,8 @@ void Editor::drawCelGuides(ui::Graphics* g, const Cel* cel, const Cel* mouseCel)
     scrCmpBounds = getCelScreenBounds(mouseCel);
     sprCmpBounds = mouseCel->bounds();
 
-    drawCelBounds(
-      g, mouseCel,
-      color_utils::color_for_ui(Preferences::instance().guides.autoGuidesColor()));
+    const gfx::Color color = color_utils::color_for_ui(Preferences::instance().guides.autoGuidesColor());
+    drawCelBounds(g, mouseCel, color);
   }
   // Use whole canvas
   else {
@@ -1209,15 +1327,17 @@ void Editor::drawCelHGuide(ui::Graphics* g,
 
   // Vertical guide to touch the horizontal line
   {
-    CheckedDrawMode checked(g, 0, color, gfx::ColorNone);
+    ui::Paint paint;
+    ui::set_checkered_paint_mode(paint, 0, color, gfx::ColorNone);
+    paint.color(color);
 
     if (scrY < scrCmpBounds.y)
-      g->drawVLine(color, dottedX, scrCelBounds.y, scrCmpBounds.y - scrCelBounds.y);
+      g->drawVLine(dottedX, scrCelBounds.y, scrCmpBounds.y - scrCelBounds.y, paint);
     else if (scrY > scrCmpBounds.y2())
-      g->drawVLine(color, dottedX, scrCmpBounds.y2(), scrCelBounds.y2() - scrCmpBounds.y2());
+      g->drawVLine(dottedX, scrCmpBounds.y2(), scrCelBounds.y2() - scrCmpBounds.y2(), paint);
   }
 
-  auto text = base::convert_to<std::string>(ABS(sprX2 - sprX1)) + "px";
+  auto text = fmt::format("{}px", ABS(sprX2 - sprX1));
   const int textW = Graphics::measureUITextLength(text, font());
   g->drawText(text,
               color_utils::blackandwhite_neg(color), color,
@@ -1235,15 +1355,17 @@ void Editor::drawCelVGuide(ui::Graphics* g,
 
   // Horizontal guide to touch the vertical line
   {
-    CheckedDrawMode checked(g, 0, color, gfx::ColorNone);
+    ui::Paint paint;
+    ui::set_checkered_paint_mode(paint, 0, color, gfx::ColorNone);
+    paint.color(color);
 
     if (scrX < scrCmpBounds.x)
-      g->drawHLine(color, scrCelBounds.x, dottedY, scrCmpBounds.x - scrCelBounds.x);
+      g->drawHLine(scrCelBounds.x, dottedY, scrCmpBounds.x - scrCelBounds.x, paint);
     else if (scrX > scrCmpBounds.x2())
-      g->drawHLine(color, scrCmpBounds.x2(), dottedY, scrCelBounds.x2() - scrCmpBounds.x2());
+      g->drawHLine(scrCmpBounds.x2(), dottedY, scrCelBounds.x2() - scrCmpBounds.x2(), paint);
   }
 
-  auto text = base::convert_to<std::string>(ABS(sprY2 - sprY1)) + "px";
+  auto text = fmt::format("{}px", ABS(sprY2 - sprY1));
   g->drawText(text,
               color_utils::blackandwhite_neg(color), color,
               gfx::Point(scrX, (scrY1+scrY2)/2-textHeight()/2));
@@ -1275,7 +1397,7 @@ void Editor::flashCurrentLayer()
     return;
 
   Site site = getSite();
-  if (const Cel* src_cel = site.cel()) {
+  if (site.cel()) {
     // Hide and destroy the extra cel used by the brush preview
     // because we'll need to use the extra cel now for the flashing
     // layer.
@@ -1284,23 +1406,18 @@ void Editor::flashCurrentLayer()
     m_renderEngine->removePreviewImage();
 
     ExtraCelRef extraCel(new ExtraCel);
-    extraCel->create(m_sprite, src_cel->bounds(), m_frame, 255);
-    extraCel->setType(render::ExtraType::COMPOSITE);
-    extraCel->setBlendMode(BlendMode::NEG_BW);
+    extraCel->setType(render::ExtraType::OVER_COMPOSITE);
+    extraCel->setBlendMode(doc::BlendMode::NEG_BW);
 
-    Image* flash_image = extraCel->image();
-    clear_image(flash_image, flash_image->maskColor());
-    copy_image(flash_image, src_cel->image(), 0, 0);
-
-    ExtraCelRef oldExtraCel = m_document->extraCel();
     m_document->setExtraCel(extraCel);
     m_flashing = Flashing::WithFlashExtraCel;
 
-    invalidate();
+    invalidateCanvas();
   }
 }
 
-gfx::Point Editor::autoScroll(MouseMessage* msg, AutoScroll dir)
+gfx::Point Editor::autoScroll(const ui::MouseMessage* msg,
+                              const AutoScroll dir)
 {
   gfx::Point mousePos = msg->position();
   if (!Preferences::instance().editor.autoScroll())
@@ -1335,12 +1452,13 @@ gfx::Point Editor::autoScroll(MouseMessage* msg, AutoScroll dir)
     setEditorScroll(scroll);
 
     mousePos -= delta;
-    ui::set_mouse_position(mousePos);
+    ui::set_mouse_position(mousePos,
+                           display());
 
     m_oldPos = mousePos;
     mousePos = gfx::Point(
-      base::clamp(mousePos.x, vp.x, vp.x2()-1),
-      base::clamp(mousePos.y, vp.y, vp.y2()-1));
+      std::clamp(mousePos.x, vp.x, vp.x2()-1),
+      std::clamp(mousePos.y, vp.y, vp.y2()-1));
   }
   else
     m_oldPos = mousePos;
@@ -1463,7 +1581,11 @@ void Editor::setCustomizationDelegate(EditorCustomizationDelegate* delegate)
 
 Rect Editor::getViewportBounds()
 {
-  return screenToEditor(View::getView(this)->viewportBounds());
+  ui::View* view = View::getView(this);
+  if (view)
+    return screenToEditor(view->viewportBounds());
+  else
+    return bounds();
 }
 
 // Returns the visible area of the active sprite.
@@ -1661,6 +1783,7 @@ app::Color Editor::getColorByPosition(const gfx::Point& mousePos)
     gfx::PointF editorPos = screenToEditorF(mousePos);
 
     ColorPicker picker;
+    site.tilemapMode(TilemapMode::Pixels);
     picker.pickColor(site, editorPos, m_proj,
                      ColorPicker::FromComposition);
     return picker.color();
@@ -1669,11 +1792,28 @@ app::Color Editor::getColorByPosition(const gfx::Point& mousePos)
     return app::Color::fromMask();
 }
 
-bool Editor::startStraightLineWithFreehandTool(const ui::MouseMessage* msg)
+doc::tile_t Editor::getTileByPosition(const gfx::Point& mousePos)
+{
+  Site site = getSite();
+  if (site.sprite()) {
+    gfx::PointF editorPos = screenToEditorF(mousePos);
+
+    ColorPicker picker;
+    site.tilemapMode(TilemapMode::Tiles);
+    picker.pickColor(site, editorPos, m_proj,
+                     ColorPicker::FromComposition);
+
+    return picker.tile();
+  }
+  else
+    return doc::notile;
+}
+
+bool Editor::startStraightLineWithFreehandTool(const tools::Pointer* pointer)
 {
   tools::Tool* tool = App::instance()->activeToolManager()->selectedTool();
   // TODO add support for more buttons (X1, X2, etc.)
-  int i = (msg && msg->right() ? 1: 0);
+  int i = (pointer && pointer->button() == tools::Pointer::Button::Right ? 1: 0);
   return
     (isActive() &&
      (hasMouse() || hasCapture()) &&
@@ -1800,7 +1940,7 @@ bool Editor::onProcessMessage(Message* msg)
         // layer.
         if (m_flashing != Flashing::None) {
           m_flashing = Flashing::None;
-          invalidate();
+          invalidateCanvas();
         }
 
         m_oldPos = mouseMsg->position();
@@ -1892,24 +2032,61 @@ bool Editor::onProcessMessage(Message* msg)
 
     case kKeyDownMessage:
 #if ENABLE_DEVMODE
-      // Switch render mode
-      if (!msg->ctrlPressed() &&
+      // Switch renderer
+      if (msg->modifiers() == 0 &&
           static_cast<KeyMessage*>(msg)->scancode() == kKeyF1) {
-        Preferences::instance().experimental.newRenderEngine(
-          !Preferences::instance().experimental.newRenderEngine());
-        invalidate();
+        // TODO replace this experimental flag with a new enum (or
+        //      maybe there is no need for user option now that the
+        //      new engine allows to disable the bilinear mipmapping
+        //      interpolation) as we still need the "old" engine to
+        //      render reference layers
+        auto& newRenderEngine = Preferences::instance().experimental.newRenderEngine;
+
+#if SK_ENABLE_SKSL
+        // Simple (new) -> Simple (old) -> Shader -> Simple (new) -> ...
+        if (m_renderEngine->type() == EditorRender::Type::kShaderRenderer) {
+          newRenderEngine(true);
+          m_renderEngine->setType(EditorRender::Type::kSimpleRenderer);
+        }
+        else {
+          if (newRenderEngine()) {
+            newRenderEngine(false);
+          }
+          else {
+            newRenderEngine(true);
+            m_renderEngine->setType(EditorRender::Type::kShaderRenderer);
+          }
+        }
+#else
+        // Simple (new) <-> Simple (old)
+        newRenderEngine(!newRenderEngine());
+#endif
+
+        switch (m_renderEngine->type()) {
+          case EditorRender::Type::kSimpleRenderer:
+            StatusBar::instance()->showTip(
+              1000, fmt::format("Simple Renderer ({})", newRenderEngine() ? "new": "old"));
+            break;
+          case EditorRender::Type::kShaderRenderer:
+            StatusBar::instance()->showTip(
+              1000, fmt::format("Shader Renderer"));
+            break;
+        }
+
+        app_refresh_screen();
         return true;
       }
-#endif
-      if (m_sprite) {
+#endif  // ENABLE_DEVMODE
+
+      if (m_sprite && (isActive() || hasMouse())) {
         EditorStatePtr holdState(m_state);
         bool used = m_state->onKeyDown(this, static_cast<KeyMessage*>(msg));
 
-        updateToolLoopModifiersIndicators();
-        updateAutoCelGuides(msg);
         if (hasMouse()) {
+          updateToolLoopModifiersIndicators();
+          updateAutoCelGuides(msg);
           updateQuicktool();
-          setCursor(ui::get_mouse_position());
+          setCursor(mousePosInDisplay());
         }
 
         if (used)
@@ -1918,15 +2095,15 @@ bool Editor::onProcessMessage(Message* msg)
       break;
 
     case kKeyUpMessage:
-      if (m_sprite) {
+      if (m_sprite && (isActive() || hasMouse())) {
         EditorStatePtr holdState(m_state);
         bool used = m_state->onKeyUp(this, static_cast<KeyMessage*>(msg));
 
-        updateToolLoopModifiersIndicators();
-        updateAutoCelGuides(msg);
         if (hasMouse()) {
+          updateToolLoopModifiersIndicators();
+          updateAutoCelGuides(msg);
           updateQuicktool();
-          setCursor(ui::get_mouse_position());
+          setCursor(mousePosInDisplay());
         }
 
         if (used)
@@ -1973,7 +2150,7 @@ bool Editor::onProcessMessage(Message* msg)
           // (e.g. in the case of the Eraser tool).
           m_document->setExtraCel(ExtraCelRef(nullptr));
 
-          showBrushPreview(ui::get_mouse_position());
+          showBrushPreview(mousePosInDisplay());
         }
         else {
           m_document->setExtraCel(ExtraCelRef(nullptr));
@@ -1982,7 +2159,7 @@ bool Editor::onProcessMessage(Message* msg)
         // Redraw all editors (without this the preview editor will
         // still show the flashing layer).
         for (auto editor : UIContext::instance()->getAllEditorsIncludingPreview(m_document)) {
-          editor->invalidate();
+          editor->invalidateCanvas();
 
           // Re-generate painting messages just right now (it looks
           // like the widget update region is lost after the last
@@ -2036,7 +2213,7 @@ void Editor::onPaint(ui::PaintEvent& ev)
 
   Graphics* g = ev.graphics();
   gfx::Rect rc = clientBounds();
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
 
   // Editor without sprite
   if (!m_sprite) {
@@ -2107,7 +2284,16 @@ void Editor::onActiveToolChange(tools::Tool* tool)
   m_state->onActiveToolChange(this, tool);
   if (hasMouse()) {
     updateStatusBar();
-    setCursor(ui::get_mouse_position());
+    setCursor(mousePosInDisplay());
+  }
+}
+
+void Editor::onSamplingChange()
+{
+  if (m_proj.scaleX() < 1.0 &&
+      m_proj.scaleY() < 1.0 &&
+      isUsingNewRenderEngine()) {
+    invalidate();
   }
 }
 
@@ -2129,6 +2315,8 @@ void Editor::onTiledModeBeforeChange()
 void Editor::onTiledModeChange()
 {
   ASSERT(m_sprite);
+
+  m_tiledModeHelper.mode(m_docPref.tiled.mode());
 
   // Get the sprite point in the middle of the editor, so we can
   // restore this with the new tiled mode in the main tile.
@@ -2210,15 +2398,15 @@ void Editor::onRemoveSlice(DocEvent& ev)
   }
 }
 
-void Editor::setCursor(const gfx::Point& mouseScreenPos)
+void Editor::setCursor(const gfx::Point& mouseDisplayPos)
 {
   Rect vp = View::getView(this)->viewportBounds();
-  if (!vp.contains(mouseScreenPos))
+  if (!vp.contains(mouseDisplayPos))
     return;
 
   bool used = false;
   if (m_sprite)
-    used = m_state->onSetCursor(this, mouseScreenPos);
+    used = m_state->onSetCursor(this, mouseDisplayPos);
 
   if (!used)
     showMouseCursor(kArrowCursor);
@@ -2230,12 +2418,13 @@ bool Editor::canDraw()
           m_layer->isImage() &&
           m_layer->isVisibleHierarchy() &&
           m_layer->isEditableHierarchy() &&
-          !m_layer->isReference());
+          !m_layer->isReference() &&
+          !m_document->isReadOnly());
 }
 
 bool Editor::isInsideSelection()
 {
-  gfx::Point spritePos = screenToEditor(ui::get_mouse_position());
+  gfx::Point spritePos = screenToEditor(mousePosInDisplay());
   spritePos -= mainTilePosition();
 
   KeyAction action = m_customizationDelegate->getPressedKeyAction(KeyContext::SelectionTool);
@@ -2373,8 +2562,8 @@ void Editor::setZoomAndCenterInMouse(const Zoom& zoom,
   // extra space for the zoom)
   gfx::Rect visibleBounds = editorToScreen(
     getViewportBounds().createIntersection(gfx::Rect(gfx::Point(0, 0), canvasSize())));
-  screenPos.x = base::clamp(screenPos.x, visibleBounds.x, visibleBounds.x2()-1);
-  screenPos.y = base::clamp(screenPos.y, visibleBounds.y, visibleBounds.y2()-1);
+  screenPos.x = std::clamp(screenPos.x, visibleBounds.x, visibleBounds.x2()-1);
+  screenPos.y = std::clamp(screenPos.y, visibleBounds.y, visibleBounds.y2()-1);
 
   spritePos = screenToEditor(screenPos);
 
@@ -2460,7 +2649,7 @@ void Editor::pasteImage(const Image* image, const Mask* mask)
     // In other case, if the center is visible, we put the pasted
     // image in its original location.
     else {
-      x = base::clamp(x, visibleBounds.x-image->width(), visibleBounds.x2()-1);
+      x = std::clamp(x, visibleBounds.x-image->width(), visibleBounds.x2()-1);
     }
 
     if (maskCenter.y < visibleBounds.y ||
@@ -2468,22 +2657,33 @@ void Editor::pasteImage(const Image* image, const Mask* mask)
       y = visibleBounds.y + visibleBounds.h/2 - image->height()/2;
     }
     else {
-      y = base::clamp(y, visibleBounds.y-image->height(), visibleBounds.y2()-1);
+      y = std::clamp(y, visibleBounds.y-image->height(), visibleBounds.y2()-1);
     }
 
     // Limit the image inside the sprite's bounds.
     if (sprite->width() <= image->width() ||
         sprite->height() <= image->height()) {
-      // TODO review this (I think limits are wrong and high limit can
-      //      be negative here)
-      x = base::clamp(x, 0, sprite->width() - image->width());
-      y = base::clamp(y, 0, sprite->height() - image->height());
+      x = std::clamp(x, 0, std::max(0, sprite->width() - image->width()));
+      y = std::clamp(y, 0, std::max(0, sprite->height() - image->height()));
     }
     else {
       // Also we always limit the 1 image pixel inside the sprite's bounds.
-      x = base::clamp(x, -image->width()+1, sprite->width()-1);
-      y = base::clamp(y, -image->height()+1, sprite->height()-1);
+      x = std::clamp(x, -image->width()+1, sprite->width()-1);
+      y = std::clamp(y, -image->height()+1, sprite->height()-1);
     }
+  }
+
+  Site site = getSite();
+
+  // Snap to grid a pasted tilemap
+  // TODO should we move this to PixelsMovement or MovingPixelsState?
+  if (site.tilemapMode() == TilemapMode::Tiles) {
+    gfx::Rect gridBounds = site.gridBounds();
+    gfx::Point pt = snap_to_grid(gridBounds,
+                                 gfx::Point(x, y),
+                                 PreferSnapTo::ClosestGridVertex);
+    x = pt.x;
+    y = pt.y;
   }
 
   // Clear brush preview, as the extra cel will be replaced with the
@@ -2494,7 +2694,7 @@ void Editor::pasteImage(const Image* image, const Mask* mask)
   mask2.setOrigin(x, y);
 
   PixelsMovementPtr pixelsMovement(
-    new PixelsMovement(UIContext::instance(), getSite(),
+    new PixelsMovement(UIContext::instance(), site,
                        image, &mask2, "Paste"));
 
   setState(EditorStatePtr(new MovingPixelsState(this, NULL, pixelsMovement, NoHandle)));
@@ -2503,11 +2703,12 @@ void Editor::pasteImage(const Image* image, const Mask* mask)
 void Editor::startSelectionTransformation(const gfx::Point& move, double angle)
 {
   if (auto movingPixels = dynamic_cast<MovingPixelsState*>(m_state.get())) {
-    movingPixels->translate(move);
+    movingPixels->translate(gfx::PointF(move));
     if (std::fabs(angle) > 1e-5)
       movingPixels->rotate(angle);
   }
-  else if (StandbyState* standby = dynamic_cast<StandbyState*>(m_state.get())) {
+  else if (auto standby = dynamic_cast<StandbyState*>(m_state.get())) {
+    ASSERT(m_document->isMaskVisible());
     standby->startSelectionTransformation(this, move, angle);
   }
 }
@@ -2518,6 +2719,12 @@ void Editor::startFlipTransformation(doc::algorithm::FlipType flipType)
     movingPixels->flip(flipType);
   else if (auto standby = dynamic_cast<StandbyState*>(m_state.get()))
     standby->startFlipTransformation(this, flipType);
+}
+
+void Editor::updateTransformation(const Transformation& transform)
+{
+  if (auto movingPixels = dynamic_cast<MovingPixelsState*>(m_state.get()))
+    movingPixels->updateTransformation(transform);
 }
 
 void Editor::notifyScrollChanged()
@@ -2531,7 +2738,7 @@ void Editor::notifyScrollChanged()
   // Update status bar and mouse cursor
   if (hasMouse()) {
     updateStatusBar();
-    setCursor(ui::get_mouse_position());
+    setCursor(mousePosInDisplay());
   }
 }
 
@@ -2581,7 +2788,8 @@ void Editor::startZoomingState(ui::MouseMessage* msg)
 }
 
 void Editor::play(const bool playOnce,
-                  const bool playAll)
+                  const bool playAll,
+                  const bool playSubtags)
 {
   ASSERT(m_state);
   if (!m_state)
@@ -2591,7 +2799,9 @@ void Editor::play(const bool playOnce,
     stop();
 
   m_isPlaying = true;
-  setState(EditorStatePtr(new PlayState(playOnce, playAll)));
+  setState(EditorStatePtr(new PlayState(playOnce,
+                                        playAll,
+                                        playSubtags)));
 }
 
 void Editor::stop()
@@ -2617,63 +2827,31 @@ bool Editor::isPlaying() const
   return m_isPlaying;
 }
 
-void Editor::showAnimationSpeedMultiplierPopup(Option<bool>& playOnce,
-                                               Option<bool>& playAll,
-                                               const bool withStopBehaviorOptions)
+void Editor::showAnimationSpeedMultiplierPopup()
 {
-  const double options[] = { 0.25, 0.5, 1.0, 1.5, 2.0, 3.0 };
-  Menu menu;
+  const bool wasPlaying = isPlaying();
 
-  for (double option : options) {
-    MenuItem* item = new MenuItem("Speed x" + base::convert_to<std::string>(option));
-    item->Click.connect([this, option]{ setAnimationSpeedMultiplier(option); });
-    item->setSelected(m_aniSpeed == option);
-    menu.addChild(item);
+  if (auto menu = AppMenus::instance()->getAnimationMenu()) {
+    UIContext::SetTargetView setView(m_docView);
+    menu->showPopup(mousePosInDisplay(), display());
   }
 
-  menu.addChild(new MenuSeparator);
-
-  // Play once option
-  {
-    MenuItem* item = new MenuItem("Play Once");
-    item->Click.connect(
-      [&playOnce]() {
-        playOnce(!playOnce());
-      });
-    item->setSelected(playOnce());
-    menu.addChild(item);
-  }
-
-  // Play all option
-  {
-    MenuItem* item = new MenuItem("Play All Frames (Ignore Tags)");
-    item->Click.connect(
-      [&playAll]() {
-        playAll(!playAll());
-      });
-    item->setSelected(playAll());
-    menu.addChild(item);
-  }
-
-  if (withStopBehaviorOptions) {
-    MenuItem* item = new MenuItem("Rewind on Stop");
-    item->Click.connect(
-      []() {
-        // Switch the "rewind_on_stop" option
-        Preferences::instance().general.rewindOnStop(
-          !Preferences::instance().general.rewindOnStop());
-      });
-    item->setSelected(Preferences::instance().general.rewindOnStop());
-    menu.addChild(item);
-  }
-
-  menu.showPopup(ui::get_mouse_position());
-
-  if (isPlaying()) {
+  if (wasPlaying) {
     // Re-play
     stop();
-    play(playOnce(),
-         playAll());
+
+    // TODO improve/generalize this in some way
+    auto& pref = Preferences::instance();
+    if (m_docView->isPreview()) {
+      play(pref.preview.playOnce(),
+           pref.preview.playAll(),
+           pref.preview.playSubtags());
+    }
+    else {
+      play(pref.editor.playOnce(),
+           pref.editor.playAll(),
+           pref.editor.playSubtags());
+    }
   }
 }
 
@@ -2715,77 +2893,23 @@ gfx::Point Editor::calcExtraPadding(const Projection& proj)
 
 gfx::Size Editor::canvasSize() const
 {
-  gfx::Size sz(m_sprite->width(),
-               m_sprite->height());
-  if (int(m_docPref.tiled.mode()) & int(filters::TiledMode::X_AXIS)) {
-    sz.w += sz.w*2;
-  }
-  if (int(m_docPref.tiled.mode()) & int(filters::TiledMode::Y_AXIS)) {
-    sz.h += sz.h*2;
-  }
-  return sz;
+  return m_tiledModeHelper.canvasSize();
 }
 
 gfx::Point Editor::mainTilePosition() const
 {
-  gfx::Point pt(0, 0);
-  if (int(m_docPref.tiled.mode()) & int(filters::TiledMode::X_AXIS)) {
-    pt.x += m_sprite->width();
-  }
-  if (int(m_docPref.tiled.mode()) & int(filters::TiledMode::Y_AXIS)) {
-    pt.y += m_sprite->height();
-  }
-  return pt;
+  return m_tiledModeHelper.mainTilePosition();
 }
 
 void Editor::expandRegionByTiledMode(gfx::Region& rgn,
                                      const bool withProj) const
 {
-  gfx::Region tile = rgn;
-  const bool xTiled = (int(m_docPref.tiled.mode()) & int(filters::TiledMode::X_AXIS));
-  const bool yTiled = (int(m_docPref.tiled.mode()) & int(filters::TiledMode::Y_AXIS));
-  int w = m_sprite->width();
-  int h = m_sprite->height();
-  if (withProj) {
-    w = m_proj.applyX(w);
-    h = m_proj.applyY(h);
-  }
-  if (xTiled) {
-    tile.offset(w, 0); rgn |= tile;
-    tile.offset(w, 0); rgn |= tile;
-    tile.offset(-2*w, 0);
-  }
-  if (yTiled) {
-    tile.offset(0, h); rgn |= tile;
-    tile.offset(0, h); rgn |= tile;
-    tile.offset(0, -2*h);
-  }
-  if (xTiled && yTiled) {
-    tile.offset(w, h); rgn |= tile;
-    tile.offset(w, 0); rgn |= tile;
-    tile.offset(-w, h); rgn |= tile;
-    tile.offset(w, 0); rgn |= tile;
-  }
+  m_tiledModeHelper.expandRegionByTiledMode(rgn, withProj ? &m_proj : nullptr);
 }
 
 void Editor::collapseRegionByTiledMode(gfx::Region& rgn) const
 {
-  auto canvasSize = this->canvasSize();
-  rgn &= gfx::Region(gfx::Rect(canvasSize));
-
-  const int sprW = m_sprite->width();
-  const int sprH = m_sprite->height();
-
-  gfx::Region newRgn;
-  for (int v=0; v<canvasSize.h; v+=sprH) {
-    for (int u=0; u<canvasSize.w; u+=sprW) {
-      gfx::Region tmp(gfx::Rect(u, v, sprW, sprH));
-      tmp &= rgn;
-      tmp.offset(-u, -v);
-      newRgn |= tmp;
-    }
-  }
-  rgn = newRgn;
+  m_tiledModeHelper.collapseRegionByTiledMode(rgn);
 }
 
 bool Editor::isMovingPixels() const
@@ -2799,8 +2923,20 @@ void Editor::dropMovingPixels()
   backToPreviousState();
 }
 
+void Editor::invalidateCanvas()
+{
+  if (!isVisible())
+    return;
+
+  if (m_sprite)
+    invalidateRect(editorToScreen(getVisibleSpriteBounds()));
+  else
+    invalidate();
+}
+
 void Editor::invalidateIfActive()
 {
+
   if (isActive())
     invalidate();
 }
@@ -2820,13 +2956,13 @@ void Editor::updateAutoCelGuides(ui::Message* msg)
   // Check if the user is pressing the Ctrl or Cmd key on move
   // tool to show automatic guides.
   if (m_showAutoCelGuides &&
-      m_state->requireBrushPreview()) {
-    ui::MouseMessage* mouseMsg = dynamic_cast<ui::MouseMessage*>(msg);
+      m_state->allowLayerEdges()) {
+    auto mouseMsg = dynamic_cast<ui::MouseMessage*>(msg);
 
     ColorPicker picker;
     picker.pickColor(getSite(),
                      screenToEditorF(mouseMsg ? mouseMsg->position():
-                                                ui::get_mouse_position()),
+                                                mousePosInDisplay()),
                      m_proj, ColorPicker::FromComposition);
     m_showGuidesThisCel = (picker.layer() ? picker.layer()->cel(m_frame):
                                             nullptr);
@@ -2838,6 +2974,7 @@ void Editor::updateAutoCelGuides(ui::Message* msg)
   if (m_showGuidesThisCel != oldShowGuidesThisCel ||
       m_showAutoCelGuides != oldShowAutoCelGuides) {
     invalidate();
+    updateStatusBar();
   }
 }
 

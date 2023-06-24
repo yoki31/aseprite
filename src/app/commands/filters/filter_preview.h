@@ -1,4 +1,5 @@
 // Aseprite
+// Copyright (C) 2022-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -8,10 +9,11 @@
 #define APP_COMMANDS_FILTERS_FILTER_PREVIEW_H_INCLUDED
 #pragma once
 
-#include "base/mutex.h"
-#include "base/thread.h"
+#include "app/task.h"
 #include "ui/timer.h"
 #include "ui/widget.h"
+
+#include <mutex>
 
 namespace app {
 
@@ -32,12 +34,14 @@ namespace app {
     bool onProcessMessage(ui::Message* msg) override;
 
   private:
-    void onFilterThread();
+    void onFilterTask(base::task_token& token);
+    void onDelayedStartPreview();
 
     FilterManagerImpl* m_filterMgr;
     ui::Timer m_timer;
-    base::mutex m_filterMgrMutex;
-    std::unique_ptr<base::thread> m_filterThread;
+    ui::Timer m_restartPreviewTimer;
+    std::mutex m_filterMgrMutex;
+    app::Task m_filterTask;
     bool m_filterIsDone;
   };
 

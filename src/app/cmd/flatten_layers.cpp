@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020 Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -20,6 +20,7 @@
 #include "app/cmd/set_layer_name.h"
 #include "app/cmd/unlink_cel.h"
 #include "app/doc.h"
+#include "app/i18n/strings.h"
 #include "app/restore_visible_layers.h"
 #include "doc/algorithm/shrink_bounds.h"
 #include "doc/cel.h"
@@ -69,7 +70,8 @@ void FlattenLayers::onExecute()
   ImageRef image(Image::create(sprite->spec()));
 
   LayerImage* flatLayer;  // The layer onto which everything will be flattened.
-  color_t     bgcolor;    // The background color to use for flatLayer.
+  color_t bgcolor;        // The background color to use for flatLayer.
+  bool newFlatLayer = false;
 
   flatLayer = sprite->backgroundLayer();
   if (backgroundIsSel && flatLayer && flatLayer->isVisible()) {
@@ -80,19 +82,14 @@ void FlattenLayers::onExecute()
     // Create a new transparent layer to flatten everything onto it.
     flatLayer = new LayerImage(sprite);
     ASSERT(flatLayer->isVisible());
-    executeAndAdd(new cmd::AddLayer(sprite->root(), flatLayer, nullptr));
-    executeAndAdd(new cmd::SetLayerName(flatLayer, "Flattened"));
+    flatLayer->setName(Strings::layer_properties_flattened());
+    newFlatLayer = true;
     bgcolor = sprite->transparentColor();
-
-    if (list.front())
-      executeAndAdd(new cmd::MoveLayer(flatLayer,
-                                       list.front()->parent(),
-                                       list.front()));
   }
 
   render::Render render;
   render.setNewBlend(m_newBlendMethod);
-  render.setBgType(render::BgType::NONE);
+  render.setBgOptions(render::BgOptions::MakeNone());
 
   {
     // Show only the layers to be flattened so other layers are hidden
@@ -124,7 +121,7 @@ void FlattenLayers::onExecute()
       else {
         gfx::Rect bounds(image->bounds());
         if (doc::algorithm::shrink_bounds(
-              image.get(), bounds, image->maskColor())) {
+              image.get(), image->maskColor(), nullptr, bounds)) {
           cel_image.reset(
             doc::crop_image(image.get(), bounds, image->maskColor()));
           cel = new Cel(frame, cel_image);
@@ -134,6 +131,10 @@ void FlattenLayers::onExecute()
       }
     }
   }
+
+  // Add new flatten layer
+  if (newFlatLayer)
+    executeAndAdd(new cmd::AddLayer(list.front()->parent(), flatLayer, list.front()));
 
   // Delete flattened layers.
   for (Layer* layer : layers) {

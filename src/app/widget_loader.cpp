@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -231,6 +231,10 @@ Widget* WidgetLoader::convertXmlElementToWidget(const TiXmlElement* elem, Widget
     bool editable = bool_attr(elem, "editable", false);
     if (editable)
       ((ComboBox*)widget)->setEditable(true);
+
+    const char* suffix = elem->Attribute("suffix");
+    if (suffix)
+      ((ComboBox*)widget)->getEntryWidget()->setSuffix(suffix);
   }
   else if (elem_name == "entry" ||
            elem_name == "expr") {
@@ -260,8 +264,8 @@ Widget* WidgetLoader::convertXmlElementToWidget(const TiXmlElement* elem, Widget
     bool same_width_columns = bool_attr(elem, "same_width_columns", false);
 
     if (columns != NULL) {
-      widget = new Grid(strtol(columns, NULL, 10),
-                        same_width_columns);
+      widget = new ui::Grid(strtol(columns, NULL, 10),
+                            same_width_columns);
     }
   }
   else if (elem_name == "label") {
@@ -638,14 +642,12 @@ void WidgetLoader::fillWidgetWithXmlElementAttributes(const TiXmlElement* elem, 
     const int maxh = (maxheight ? strtol(maxheight, NULL, 10): 0);
     widget->InitTheme.connect(
       [widget, minw, minh, maxw, maxh]{
-        widget->setMinSize(gfx::Size(0, 0));
-        widget->setMaxSize(gfx::Size(std::numeric_limits<int>::max(),
-                                     std::numeric_limits<int>::max()));
+        widget->resetMinSize();
+        widget->resetMaxSize();
         const gfx::Size reqSize = widget->sizeHint();
-        widget->setMinSize(
+        widget->setMinMaxSize(
           gfx::Size((minw > 0 ? guiscale()*minw: reqSize.w),
-                    (minh > 0 ? guiscale()*minh: reqSize.h)));
-        widget->setMaxSize(
+                    (minh > 0 ? guiscale()*minh: reqSize.h)),
           gfx::Size((maxw > 0 ? guiscale()*maxw: std::numeric_limits<int>::max()),
                     (maxh > 0 ? guiscale()*maxh: std::numeric_limits<int>::max())));
       });
@@ -655,7 +657,7 @@ void WidgetLoader::fillWidgetWithXmlElementAttributes(const TiXmlElement* elem, 
     std::string styleIdStr = styleid;
     widget->InitTheme.connect(
       [widget, styleIdStr]{
-        SkinTheme* theme = static_cast<SkinTheme*>(widget->theme());
+        auto theme = SkinTheme::get(widget);
         ui::Style* style = theme->getStyleById(styleIdStr);
         if (style)
           widget->setStyle(style);
@@ -694,16 +696,16 @@ void WidgetLoader::fillWidgetWithXmlElementAttributesWithChildren(const TiXmlEle
         int hspan = cell_hspan ? strtol(cell_hspan, NULL, 10): 1;
         int vspan = cell_vspan ? strtol(cell_vspan, NULL, 10): 1;
         int align = cell_align ? convert_align_value_to_flags(cell_align): 0;
-        Grid* grid = dynamic_cast<Grid*>(widget);
-        ASSERT(grid != NULL);
+        auto grid = dynamic_cast<ui::Grid*>(widget);
+        ASSERT(grid != nullptr);
 
         grid->addChildInCell(child, hspan, vspan, align);
       }
       // Attach the child in the view
       else if (widget->type() == kComboBoxWidget &&
                child->type() == kListItemWidget) {
-        ComboBox* combo = dynamic_cast<ComboBox*>(widget);
-        ASSERT(combo != NULL);
+        auto combo = dynamic_cast<ComboBox*>(widget);
+        ASSERT(combo != nullptr);
 
         combo->addItem(dynamic_cast<ListItem*>(child));
       }

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2021  Igara Studio S.A.
+// Copyright (C) 2021-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -18,7 +18,6 @@
 #include "app/context.h"
 #include "app/script/engine.h"
 #include "app/ui/skin/skin_theme.h"
-#include "base/clamp.h"
 #include "base/convert_to.h"
 #include "base/file_content.h"
 #include "base/fs.h"
@@ -193,7 +192,7 @@ protected:
   }
 
   void onPaint(PaintEvent& ev) override {
-    auto theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     Graphics* g = ev.graphics();
     View* view = View::getView(this);
     gfx::Color linesBg = theme->colors.textboxCodeFace();
@@ -310,7 +309,7 @@ public:
   }
 
   void clear() {
-    while (auto item = firstChild()) {
+    while (auto item = lastChild()) {
       removeChild(item);
       item->deferDelete();
     }
@@ -496,7 +495,7 @@ public:
                       m_state == State::ProcessingCommand);
     bool canRunCommands = (m_state == State::WaitingNextCommand);
 
-    auto theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     control()->getItem(0)->setIcon(
       (isRunning ? theme->parts.debugPause() :
                    theme->parts.debugContinue()));
@@ -664,7 +663,7 @@ public:
           bounds.w = std::max(bounds.w, 256*guiscale());
           bounds.h = std::max(bounds.h, 256*guiscale());
         }
-        setBounds(bounds);
+        expandWindow(bounds.size());
         invalidate();
       }
 
@@ -730,7 +729,7 @@ private:
   }
 
   void clearLocals() {
-    while (auto item = locals()->firstChild()) {
+    while (auto item = locals()->lastChild()) {
       locals()->removeChild(item);
       item->deferDelete();
     }

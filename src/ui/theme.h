@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2020-2021  Igara Studio S.A.
+// Copyright (C) 2020-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -16,6 +16,7 @@
 #include "ui/base.h"
 #include "ui/cursor_type.h"
 #include "ui/style.h"
+#include "ui/scale.h"
 
 namespace gfx {
   class Region;
@@ -38,11 +39,16 @@ namespace ui {
   void set_theme(Theme* theme, const int uiscale);
   Theme* get_theme();
 
+  inline int CALC_FOR_CENTER(int p, int s1, int s2) {
+    return (p/guiscale() + (s1/guiscale())/2 - (s2/guiscale())/2)*guiscale();
+  }
+
   struct PaintWidgetPartInfo {
     gfx::Color bgColor;
     int styleFlags;           // ui::Style::Layer flags
     const std::string* text;
     int mnemonic;
+    os::Surface* icon;
 
     PaintWidgetPartInfo();
     PaintWidgetPartInfo(const Widget* widget);
@@ -101,6 +107,9 @@ namespace ui {
                               const int arrowAlign,
                               const gfx::Rect& target);
 
+    void paintTextBoxWithStyle(Graphics* g,
+                               const Widget* widget);
+
     virtual gfx::Size calcSizeHint(const Widget* widget,
                                    const Style* style);
     virtual gfx::Border calcBorder(const Widget* widget,
@@ -116,6 +125,10 @@ namespace ui {
                               gfx::Rect& textBounds, int& textAlign);
     virtual gfx::Color calcBgColor(const Widget* widget,
                                    const Style* style);
+    virtual gfx::Size calcMinSize(const Widget* widget,
+                                  const Style* style);
+    virtual gfx::Size calcMaxSize(const Widget* widget,
+                                  const Style* style);
 
     static void drawSlices(Graphics* g,
                            os::Surface* sheet,
@@ -125,8 +138,8 @@ namespace ui {
                            const gfx::Color color,
                            const bool drawCenter = true);
 
-    static  void drawTextBox(Graphics* g, Widget* textbox,
-                             int* w, int* h, gfx::Color bg, gfx::Color fg);
+    static void drawTextBox(Graphics* g, const Widget* textbox,
+                            int* w, int* h, gfx::Color bg, gfx::Color fg);
 
   protected:
     virtual void onRegenerateTheme() = 0;
@@ -138,6 +151,7 @@ namespace ui {
                     const Style::Layer& layer,
                     const std::string& text,
                     const int mnemonic,
+                    os::Surface* icon,
                     gfx::Rect& rc,
                     gfx::Color& bgColor);
     void measureLayer(const Widget* widget,

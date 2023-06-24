@@ -1,15 +1,13 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #include "app/color_utils.h"
-#include "app/modules/palettes.h"
 #include "app/util/wrap_point.h"
 #include "app/util/wrap_value.h"
-#include "base/clamp.h"
 #include "doc/blend_funcs.h"
 #include "doc/blend_internals.h"
 #include "doc/image_impl.h"
@@ -39,6 +37,11 @@ public:
   virtual void prepareVForPointShape(ToolLoop* loop, int y) { }
   virtual void prepareUForPointShapeWholeScanline(ToolLoop* loop, int x1) { }
   virtual void prepareUForPointShapeSlicedScanline(ToolLoop* loop, bool leftSlice, int x1) { }
+};
+
+class NoopInkProcessing : public BaseInkProcessing {
+public:
+  void processScanline(int x1, int y, int x2, ToolLoop* loop) override { }
 };
 
 typedef std::unique_ptr<BaseInkProcessing> InkProcessingPtr;
@@ -145,7 +148,7 @@ public:
   }
 
   void processPixel(int x, int y) {
-    *SimpleInkProcessing<CopyInkProcessing<ImageTraits>, ImageTraits>::m_dstAddress = m_color;
+    *this->m_dstAddress = m_color;
   }
 
 private:
@@ -198,7 +201,7 @@ template<>
 class LockAlphaInkProcessing<IndexedTraits> : public DoubleInkProcessing<LockAlphaInkProcessing<IndexedTraits>, IndexedTraits> {
 public:
   LockAlphaInkProcessing(ToolLoop* loop)
-    : m_palette(get_current_palette())
+    : m_palette(loop->getPalette())
     , m_rgbmap(loop->getRgbMap())
     , m_opacity(loop->getOpacity())
     , m_maskIndex(loop->getLayer()->isBackground() ? -1: loop->sprite()->transparentColor()) {
@@ -270,7 +273,7 @@ template<>
 class TransparentInkProcessing<IndexedTraits> : public DoubleInkProcessing<TransparentInkProcessing<IndexedTraits>, IndexedTraits> {
 public:
   TransparentInkProcessing(ToolLoop* loop) :
-    m_palette(get_current_palette()),
+    m_palette(loop->getPalette()),
     m_rgbmap(loop->getRgbMap()),
     m_opacity(loop->getOpacity()),
     m_maskIndex(loop->getLayer()->isBackground() ? -1: loop->sprite()->transparentColor()),
@@ -292,10 +295,7 @@ public:
       c = m_palette->getEntry(c);
 
     c = rgba_blender_normal(c, m_color, m_opacity);
-    *m_dstAddress = m_rgbmap->mapColor(rgba_getr(c),
-                                       rgba_getg(c),
-                                       rgba_getb(c),
-                                       rgba_geta(c));
+    *m_dstAddress = m_rgbmap->mapColor(c);
   }
 
 private:
@@ -345,7 +345,7 @@ template<>
 class MergeInkProcessing<IndexedTraits> : public DoubleInkProcessing<MergeInkProcessing<IndexedTraits>, IndexedTraits> {
 public:
   MergeInkProcessing(ToolLoop* loop) :
-    m_palette(get_current_palette()),
+    m_palette(loop->getPalette()),
     m_rgbmap(loop->getRgbMap()),
     m_opacity(loop->getOpacity()),
     m_maskIndex(loop->getLayer()->isBackground() ? -1: loop->sprite()->transparentColor()) {
@@ -365,10 +365,7 @@ public:
       c = m_palette->getEntry(c);
 
     c = rgba_blender_merge(c, m_color, m_opacity);
-    *m_dstAddress = m_rgbmap->mapColor(rgba_getr(c),
-                                       rgba_getg(c),
-                                       rgba_getb(c),
-                                       rgba_geta(c));
+    *m_dstAddress = m_rgbmap->mapColor(c);
   }
 
 private:
@@ -496,12 +493,12 @@ template<>
 class BlurInkProcessing<IndexedTraits> : public DoubleInkProcessing<BlurInkProcessing<IndexedTraits>, IndexedTraits> {
 public:
   BlurInkProcessing(ToolLoop* loop) :
-    m_palette(get_current_palette()),
+    m_palette(loop->getPalette()),
     m_rgbmap(loop->getRgbMap()),
     m_opacity(loop->getOpacity()),
     m_tiledMode(loop->getTiledMode()),
     m_srcImage(loop->getSrcImage()),
-    m_area(get_current_palette(),
+    m_area(loop->getPalette(),
            loop->getLayer()->isBackground() ? -1: loop->sprite()->transparentColor()) {
   }
 
@@ -520,8 +517,7 @@ public:
                            doc::rgba(m_area.r, m_area.g, m_area.b, m_area.a),
                            m_opacity);
 
-      *m_dstAddress = m_rgbmap->mapColor(
-        rgba_getr(c), rgba_getg(c), rgba_getb(c), rgba_geta(c));
+      *m_dstAddress = m_rgbmap->mapColor(c);
     }
     else {
       *m_dstAddress = *m_srcAddress;
@@ -616,7 +612,7 @@ template<>
 class ReplaceInkProcessing<IndexedTraits> : public DoubleInkProcessing<ReplaceInkProcessing<IndexedTraits>, IndexedTraits> {
 public:
   ReplaceInkProcessing(ToolLoop* loop) {
-    m_palette = get_current_palette();
+    m_palette = loop->getPalette();
     m_rgbmap = loop->getRgbMap();
     m_color1 = loop->getPrimaryColor();
     m_color2 = loop->getSecondaryColor();
@@ -633,8 +629,7 @@ public:
         color_t c = rgba_blender_normal(
           m_palette->getEntry(*m_srcAddress), m_color2, m_opacity);
 
-        *m_dstAddress = m_rgbmap->mapColor(
-          rgba_getr(c), rgba_getg(c), rgba_getb(c), rgba_geta(c));
+        *m_dstAddress = m_rgbmap->mapColor(c);
       }
     }
   }
@@ -647,6 +642,12 @@ private:
   int m_opacity;
 };
 
+template<>
+void ReplaceInkProcessing<TilemapTraits>::processPixel(int x, int y) {
+  color_t c = *m_srcAddress;
+  *m_dstAddress = (c == m_color1 ? m_color2: c);
+}
+
 //////////////////////////////////////////////////////////////////////
 // Jumble Ink
 //////////////////////////////////////////////////////////////////////
@@ -655,7 +656,7 @@ template<typename ImageTraits>
 class JumbleInkProcessing : public DoubleInkProcessing<JumbleInkProcessing<ImageTraits>, ImageTraits> {
 public:
   JumbleInkProcessing(ToolLoop* loop) :
-    m_palette(get_current_palette()),
+    m_palette(loop->getPalette()),
     m_rgbmap(loop->getRgbMap()),
     m_speed(loop->getSpeed() / 4),
     m_opacity(loop->getOpacity()),
@@ -679,8 +680,8 @@ private:
                               m_srcImageHeight),
                     pt, false);
 
-    pt.x = base::clamp(pt.x, 0, m_srcImageWidth-1);
-    pt.y = base::clamp(pt.y, 0, m_srcImageHeight-1);
+    pt.x = std::clamp(pt.x, 0, m_srcImageWidth-1);
+    pt.y = std::clamp(pt.y, 0, m_srcImageHeight-1);
 
     m_color = get_pixel(m_srcImage, pt.x, pt.y);
   }
@@ -721,10 +722,7 @@ void JumbleInkProcessing<IndexedTraits>::processPixel(int x, int y)
                                  tc, m_opacity);
 
   if (rgba_geta(c) >= 128)
-    *m_dstAddress = m_rgbmap->mapColor(rgba_getr(c),
-                                       rgba_getg(c),
-                                       rgba_getb(c),
-                                       rgba_geta(c));
+    *m_dstAddress = m_rgbmap->mapColor(c);
   else
     *m_dstAddress = 0;
 }
@@ -851,7 +849,7 @@ public:
   using pixel_t = IndexedTraits::pixel_t;
 
   PixelShadingInkHelper(ToolLoop* loop) :
-    m_palette(get_current_palette()),
+    m_palette(loop->getPalette()),
     m_remap(loop->getShadingRemap()),
     m_left(loop->getMouseButton() == ToolLoop::Left) {
   }
@@ -968,7 +966,7 @@ public:
   GradientInkProcessing(ToolLoop* loop)
     : GradientRenderer(loop)
     , m_opacity(loop->getOpacity())
-    , m_palette(get_current_palette())
+    , m_palette(loop->getPalette())
     , m_rgbmap(loop->getRgbMap())
     , m_maskIndex(loop->getLayer()->isBackground() ? -1: loop->sprite()->transparentColor())
   {
@@ -1060,10 +1058,7 @@ void GradientInkProcessing<IndexedTraits>::processPixel(int x, int y)
     c0 = m_palette->getEntry(c0);
   c = rgba_blender_normal(c0, c, m_opacity);
 
-  *m_dstAddress = m_rgbmap->mapColor(rgba_getr(c),
-                                     rgba_getg(c),
-                                     rgba_getb(c),
-                                     rgba_geta(c));
+  *m_dstAddress = m_rgbmap->mapColor(c);
 
   ++m_tmpAddress;
 }
@@ -1076,48 +1071,36 @@ void GradientInkProcessing<IndexedTraits>::processPixel(int x, int y)
 template<typename ImageTraits>
 class XorInkProcessing : public DoubleInkProcessing<XorInkProcessing<ImageTraits>, ImageTraits> {
 public:
-  XorInkProcessing(ToolLoop* loop) {
-    m_color = loop->getPrimaryColor();
-  }
-  void processPixel(int x, int y) {
-    // Do nothing
-  }
-
-private:
-  color_t m_color;
+  XorInkProcessing(ToolLoop* loop) { }
+  void processPixel(int x, int y) { }
 };
 
 template<>
 void XorInkProcessing<RgbTraits>::processPixel(int x, int y) {
-  *m_dstAddress = rgba_blender_neg_bw(*m_srcAddress, m_color, 255);
+  *m_dstAddress = rgba_blender_neg_bw(*m_srcAddress, 0, 255);
 }
 
 template<>
 void XorInkProcessing<GrayscaleTraits>::processPixel(int x, int y) {
-  *m_dstAddress = graya_blender_neg_bw(*m_srcAddress, m_color, 255);
+  *m_dstAddress = graya_blender_neg_bw(*m_srcAddress, 0, 255);
 }
 
 template<>
 class XorInkProcessing<IndexedTraits> : public DoubleInkProcessing<XorInkProcessing<IndexedTraits>, IndexedTraits> {
 public:
   XorInkProcessing(ToolLoop* loop) :
-    m_palette(get_current_palette()),
-    m_rgbmap(loop->getRgbMap()),
-    m_color(m_palette->getEntry(loop->getPrimaryColor())) {
+    m_palette(loop->getPalette()),
+    m_rgbmap(loop->getRgbMap()) {
   }
 
   void processPixel(int x, int y) {
-    color_t c = rgba_blender_neg_bw(m_palette->getEntry(*m_srcAddress), m_color, 255);
-    *m_dstAddress = m_rgbmap->mapColor(rgba_getr(c),
-                                       rgba_getg(c),
-                                       rgba_getb(c),
-                                       rgba_geta(c));
+    color_t c = rgba_blender_neg_bw(m_palette->getEntry(*m_srcAddress), 0, 255);
+    *m_dstAddress = m_rgbmap->mapColor(c);
   }
 
 private:
   const Palette* m_palette;
   const RgbMap* m_rgbmap;
-  color_t m_color;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -1138,7 +1121,7 @@ public:
   BrushInkProcessingBase(ToolLoop* loop) {
     m_fgColor = loop->getPrimaryColor();
     m_bgColor = loop->getSecondaryColor();
-    m_palette = get_current_palette();
+    m_palette = loop->getPalette();
     m_brush = loop->getBrush();
     m_brushImage = (m_brush->patternImage() ? m_brush->patternImage():
                                               m_brush->image());
@@ -1924,6 +1907,19 @@ BaseInkProcessing* get_ink_proc(ToolLoop* loop)
     case IMAGE_RGB:       return new T<RgbTraits>(loop);
     case IMAGE_GRAYSCALE: return new T<GrayscaleTraits>(loop);
     case IMAGE_INDEXED:   return new T<IndexedTraits>(loop);
+  }
+  ASSERT(false);
+  return nullptr;
+}
+
+template<template<typename> class T>
+BaseInkProcessing* get_ink_proc2(ToolLoop* loop)
+{
+  switch (loop->getDstImage()->pixelFormat()) {
+    case IMAGE_RGB:       return new T<RgbTraits>(loop);
+    case IMAGE_GRAYSCALE: return new T<GrayscaleTraits>(loop);
+    case IMAGE_INDEXED:   return new T<IndexedTraits>(loop);
+    case IMAGE_TILEMAP:   return new T<TilemapTraits>(loop);
   }
   ASSERT(false);
   return nullptr;

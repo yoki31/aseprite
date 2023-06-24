@@ -1,5 +1,5 @@
 // Aseprite Document Library
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -249,10 +249,10 @@ void Brush::setImageColor(ImageColor imageColor, color_t color)
 
   switch (imageColor) {
     case ImageColor::MainColor:
-      m_mainColor.reset(new color_t(color));
+      m_mainColor = color_t(color);
       break;
     case ImageColor::BackgroundColor:
-      m_bgColor.reset(new color_t(color));
+      m_bgColor = color_t(color);
       break;
   }
 
@@ -279,6 +279,12 @@ void Brush::setImageColor(ImageColor imageColor, color_t color)
         (m_bgColor ? true: false), (m_bgColor ? *m_bgColor: 0));
       break;
   }
+}
+
+void Brush::resetImageColors()
+{
+  if (m_backupImage)
+    m_image.reset(Image::createCopy(m_backupImage.get()));
 }
 
 void Brush::setCenter(const gfx::Point& center)

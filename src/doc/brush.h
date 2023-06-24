@@ -1,5 +1,5 @@
 // Aseprite Document Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -17,6 +17,7 @@
 #include "gfx/rect.h"
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace doc {
@@ -52,7 +53,12 @@ namespace doc {
     void setAngle(int angle);
     void setImage(const Image* image,
                   const Image* maskBitmap);
+
+    // Special functions to change the colors of the image or restore
+    // the colors to the original image used to create the brush.
     void setImageColor(ImageColor imageColor, color_t color);
+    void resetImageColors();
+
     void setPattern(BrushPattern pattern) {
       m_pattern = pattern;
     }
@@ -63,6 +69,15 @@ namespace doc {
       m_patternImage = patternImage;
     }
     void setCenter(const gfx::Point& center);
+
+    // Returns the original image used to create the brush before
+    // calling any setImageColor()
+    Image* originalImage() const {
+      if (m_backupImage)
+        return m_backupImage.get();
+      else
+        return m_image.get();
+    }
 
   private:
     void clean();
@@ -83,8 +98,8 @@ namespace doc {
 
     // Extra data used for setImageColor()
     ImageRef m_backupImage; // Backup image to avoid losing original brush colors/pattern
-    std::unique_ptr<color_t> m_mainColor; // Main image brush color (nullptr if it wasn't specified)
-    std::unique_ptr<color_t> m_bgColor;   // Background color (nullptr if it wasn't specified)
+    std::optional<color_t> m_mainColor; // Main image brush color
+    std::optional<color_t> m_bgColor;   // Background color
   };
 
   typedef std::shared_ptr<Brush> BrushRef;

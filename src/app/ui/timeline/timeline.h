@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -18,17 +18,22 @@
 #include "app/ui/input_chain_element.h"
 #include "app/ui/timeline/ani_controls.h"
 #include "app/ui/timeline/timeline_observer.h"
+#include "base/debug.h"
 #include "doc/frame.h"
 #include "doc/layer.h"
+#include "doc/object_version.h"
 #include "doc/selected_frames.h"
 #include "doc/selected_layers.h"
 #include "doc/sprite.h"
+#include "doc/tag.h"
+#include "gfx/color.h"
 #include "obs/connection.h"
 #include "obs/observable.h"
 #include "ui/scroll_bar.h"
 #include "ui/timer.h"
 #include "ui/widget.h"
 
+#include <memory>
 #include <vector>
 
 namespace doc {
@@ -79,6 +84,9 @@ namespace app {
       STATE_MOVING_RANGE,
       STATE_MOVING_ONIONSKIN_RANGE_LEFT,
       STATE_MOVING_ONIONSKIN_RANGE_RIGHT,
+      STATE_MOVING_TAG,
+      STATE_RESIZING_TAG_LEFT,
+      STATE_RESIZING_TAG_RIGHT,
       // Changing layers flags states
       STATE_SHOWING_LAYERS,
       STATE_HIDING_LAYERS,
@@ -98,10 +106,7 @@ namespace app {
     void updateUsingEditor(Editor* editor);
 
     Sprite* sprite() { return m_sprite; }
-    Layer* getLayer() { return m_layer; }
-    frame_t getFrame() { return m_frame; }
 
-    State getState() const { return m_state; }
     bool isMovingCel() const;
 
     Range range() const { return m_range; }
@@ -150,11 +155,17 @@ namespace app {
     void onAfterRemoveLayer(DocEvent& ev) override;
     void onAddFrame(DocEvent& ev) override;
     void onRemoveFrame(DocEvent& ev) override;
+    void onAddCel(DocEvent& ev) override;
+    void onAfterRemoveCel(DocEvent& ev) override;
     void onLayerNameChange(DocEvent& ev) override;
     void onAddTag(DocEvent& ev) override;
     void onRemoveTag(DocEvent& ev) override;
+    void onTagChange(DocEvent& ev) override;
+    void onTagRename(DocEvent& ev) override;
+    void onLayerCollapsedChanged(DocEvent& ev) override;
 
     // app::Context slots.
+    void onBeforeCommandExecution(CommandExecutionEvent& ev);
     void onAfterCommandExecution(CommandExecutionEvent& ev);
 
     // ContextObserver impl
@@ -269,13 +280,20 @@ namespace app {
                   const bool is_disabled = false);
     void drawTop(ui::Graphics* g);
     void drawHeader(ui::Graphics* g);
-    void drawHeaderFrame(ui::Graphics* g, frame_t frame);
-    void drawLayer(ui::Graphics* g, layer_t layerIdx);
-    void drawCel(ui::Graphics* g, layer_t layerIdx, frame_t frame, Cel* cel, DrawCelData* data);
+    void drawHeaderFrame(ui::Graphics* g, const frame_t frame);
+    void drawLayer(ui::Graphics* g, const layer_t layerIdx);
+    void drawCel(ui::Graphics* g,
+                 const layer_t layerIdx, const frame_t frame,
+                 const Cel* cel, const DrawCelData* data);
     void drawCelLinkDecorators(ui::Graphics* g, const gfx::Rect& bounds,
-                               Cel* cel, frame_t frame, bool is_active, bool is_hover,
-                               DrawCelData* data);
+                               const Cel* cel, const frame_t frame,
+                               const bool is_active, const bool is_hover,
+                               const DrawCelData* data);
     void drawTags(ui::Graphics* g);
+    void drawTagBraces(ui::Graphics* g,
+                       gfx::Color tagColor,
+                       const gfx::Rect& bounds,
+                       const gfx::Rect& clipBounds);
     void drawRangeOutline(ui::Graphics* g);
     void drawPaddings(ui::Graphics* g);
     bool drawPart(ui::Graphics* g, int part, layer_t layer, frame_t frame);
@@ -305,6 +323,7 @@ namespace app {
     void cleanClk();
     gfx::Size getScrollableSize() const;
     gfx::Point getMaxScrollablePos() const;
+    doc::Layer* getLayer(int layerIndex) const;
     layer_t getLayerIndex(const Layer* layer) const;
     bool isLayerActive(const layer_t layerIdx) const;
     bool isFrameActive(const frame_t frame) const;
@@ -334,7 +353,6 @@ namespace app {
 
     // Theme/dimensions
     skin::SkinTheme* skinTheme() const;
-    gfx::Size celBoxSize() const;
     int headerBoxWidth() const;
     int headerBoxHeight() const;
     int layerBoxHeight() const;
@@ -363,6 +381,8 @@ namespace app {
     int separatorX() const;
     void setSeparatorX(int newValue);
 
+    static gfx::Color highlightColor(const gfx::Color color);
+
     ui::ScrollBar m_hbar;
     ui::ScrollBar m_vbar;
     gfx::Rect m_viewportArea;
@@ -378,6 +398,11 @@ namespace app {
     Range m_startRange;
     Range m_dropRange;
     State m_state;
+
+    // Version of the sprite before executing a command. Used to check
+    // if the sprite was modified after executing a command to avoid
+    // regenerating all rows if it's not necessary.
+    doc::ObjectVersion m_savedVersion;
 
     // Data used to display each row in the timeline
     std::vector<Row> m_rows;
@@ -396,9 +421,10 @@ namespace app {
     // Absolute mouse positions for scrolling.
     gfx::Point m_oldPos;
     // Configure timeline
-    ConfigureTimelinePopup* m_confPopup;
-    obs::scoped_connection m_ctxConn;
+    std::unique_ptr<ConfigureTimelinePopup> m_confPopup;
+    obs::scoped_connection m_ctxConn1, m_ctxConn2;
     obs::connection m_firstFrameConn;
+    obs::connection m_onionskinConn;
 
     // Marching ants stuff to show the range in the clipboard.
     // TODO merge this with the marching ants of the sprite editor (ui::Editor)
@@ -424,6 +450,26 @@ namespace app {
       layer_t activeRelativeLayer;
       frame_t activeRelativeFrame;
     } m_moveRangeData;
+
+    // Temporal data used to move tags.
+    struct ResizeTag {
+      doc::ObjectId tag = doc::NullId;
+      doc::frame_t from, to;
+      void reset() {
+        tag = doc::NullId;
+      }
+      void reset(const doc::ObjectId tagId) {
+        auto tag = doc::get<doc::Tag>(tagId);
+        if (tag) {
+          this->tag = tagId;
+          this->from = tag->fromFrame();
+          this->to = tag->toFrame();
+        }
+        else {
+          this->tag = doc::NullId;
+        }
+      }
+    } m_resizeTagData;
   };
 
 #ifdef ENABLE_UI

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -23,7 +23,6 @@
 #include "app/filename_formatter.h"
 #include "app/restore_visible_layers.h"
 #include "app/ui_context.h"
-#include "base/clamp.h"
 #include "base/convert_to.h"
 #include "base/fs.h"
 #include "base/split_string.h"
@@ -284,6 +283,10 @@ int CliProcessor::process(Context* ctx)
         else if (opt == &m_options.splitSlices()) {
           cof.splitSlices = true;
         }
+        // --split-grid
+        else if (opt == &m_options.splitGrid()) {
+          cof.splitGrid = true;
+        }
         // --layer <layer-name>
         else if (opt == &m_options.layer()) {
           cof.includeLayers.push_back(value.value());
@@ -358,6 +361,11 @@ int CliProcessor::process(Context* ctx)
             m_exporter->setTrimByGrid(true);
           }
         }
+        // --extrude
+        else if (opt == &m_options.extrude()) {
+          if (m_exporter)
+            m_exporter->setExtrude(true);
+        }
         // --crop x,y,width,height
         else if (opt == &m_options.crop()) {
           std::vector<std::string> parts;
@@ -382,35 +390,49 @@ int CliProcessor::process(Context* ctx)
           if (m_exporter)
             m_exporter->setFilenameFormat(cof.filenameFormat);
         }
+        // --tagname-format
+        else if (opt == &m_options.tagnameFormat()) {
+          cof.tagnameFormat = value.value();
+          if (m_exporter)
+            m_exporter->setTagnameFormat(cof.tagnameFormat);
+        }
         // --save-as <filename>
         else if (opt == &m_options.saveAs()) {
           if (lastDoc) {
             std::string fn = value.value();
 
-            // Automatic --split-layer, --split-tags, --split-slices
-            // in case the output filename already contains {layer},
-            // {tag}, or {slice} template elements.
-            bool hasLayerTemplate = (is_layer_in_filename_format(fn) ||
-                                     is_group_in_filename_format(fn));
-            bool hasTagTemplate = is_tag_in_filename_format(fn);
-            bool hasSliceTemplate = is_slice_in_filename_format(fn);
+            // Automatic --filename-format
+            // in case the output filename already contains template elements.
+            if (is_template_in_filename(fn)) {
+              cof.filenameFormat = fn;
+              // Automatic --split-layer, --split-tags, --split-slices
+              // in case the output filename already contains {layer},
+              // {tag}, or {slice} template elements.
+              bool hasLayerTemplate = (is_layer_in_filename_format(fn) ||
+                                      is_group_in_filename_format(fn));
+              bool hasTagTemplate = is_tag_in_filename_format(fn);
+              bool hasSliceTemplate = is_slice_in_filename_format(fn);
 
-            if (hasLayerTemplate || hasTagTemplate || hasSliceTemplate) {
-              cof.splitLayers = (cof.splitLayers || hasLayerTemplate);
-              cof.splitTags = (cof.splitTags || hasTagTemplate);
-              cof.splitSlices = (cof.splitSlices || hasSliceTemplate);
-              cof.filenameFormat =
-                get_default_filename_format(
-                  fn,
-                  true,                                   // With path
-                  (lastDoc->sprite()->totalFrames() > 1), // Has frames
-                  false,                                  // Has layer
-                  false);                                 // Has frame tag
+              if (hasLayerTemplate || hasTagTemplate || hasSliceTemplate) {
+                cof.splitLayers = (cof.splitLayers || hasLayerTemplate);
+                cof.splitTags = (cof.splitTags || hasTagTemplate);
+                cof.splitSlices = (cof.splitSlices || hasSliceTemplate);
+              }
+
+              // Save all documents
+              for (auto doc : ctx->documents()) {
+                ctx->setActiveDocument(doc);
+                cof.filename = doc->filename();
+                cof.document = doc;
+                saveFile(ctx, cof);
+              }
+              ctx->setActiveDocument(lastDoc);
             }
-
-            cof.document = lastDoc;
-            cof.filename = fn;
-            saveFile(ctx, cof);
+            else {
+              cof.filename = fn;
+              cof.document = lastDoc;
+              saveFile(ctx, cof);
+            }
           }
           else
             console.printf("A document is needed before --save-as argument\n");
@@ -421,7 +443,7 @@ int CliProcessor::process(Context* ctx)
             ASSERT(cof.document == lastDoc);
 
             std::string filename = value.value();
-            m_delegate->loadPalette(ctx, cof, filename);
+            m_delegate->loadPalette(ctx, filename);
           }
           else {
             console.printf("You need to load a document to change its palette with --palette\n");
@@ -579,6 +601,10 @@ int CliProcessor::process(Context* ctx)
         else if (opt == &m_options.oneFrame()) {
           cof.oneFrame = true;
         }
+        // --export-tileset
+        else if (opt == &m_options.exportTileset()) {
+          cof.exportTileset = true;
+        }
       }
       // File names aren't associated to any option
       else {
@@ -665,8 +691,8 @@ bool CliProcessor::openFile(Context* ctx, CliOpenFile& cof)
         // --frame-range with --frame-tag
         if (tag) {
           selFrames.insert(
-            tag->fromFrame()+base::clamp(cof.fromFrame, 0, tag->frames()-1),
-            tag->fromFrame()+base::clamp(cof.toFrame, 0, tag->frames()-1));
+            tag->fromFrame()+std::clamp(cof.fromFrame, 0, tag->frames()-1),
+            tag->fromFrame()+std::clamp(cof.toFrame, 0, tag->frames()-1));
         }
         // --frame-range without --frame-tag
         else {
@@ -678,12 +704,20 @@ bool CliProcessor::openFile(Context* ctx, CliOpenFile& cof)
       if (cof.hasLayersFilter())
         filterLayers(doc->sprite(), cof, filteredLayers);
 
-      m_exporter->addDocumentSamples(
-        doc, tag,
-        cof.splitLayers,
-        cof.splitTags,
-        (cof.hasLayersFilter() ? &filteredLayers: nullptr),
-        (!selFrames.empty() ? &selFrames: nullptr));
+      if (cof.exportTileset) {
+        m_exporter->addTilesetsSamples(
+          doc,
+          (cof.hasLayersFilter() ? &filteredLayers: nullptr));
+      }
+      else {
+        m_exporter->addDocumentSamples(
+          doc, tag,
+          cof.splitLayers,
+          cof.splitTags,
+          cof.splitGrid,
+          (cof.hasLayersFilter() ? &filteredLayers: nullptr),
+          (!selFrames.empty() ? &selFrames: nullptr));
+      }
     }
   }
 

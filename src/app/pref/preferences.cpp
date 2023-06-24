@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -54,6 +54,14 @@ Preferences::Preferences()
 
   load();
 
+  // Create a connection with the default RgbMapAlgorithm preferences
+  // to change the default algorithm in the "doc" layer.
+  quantization.rgbmapAlgorithm.AfterChange.connect(
+    [](const doc::RgbMapAlgorithm& newValue){
+      doc::Sprite::SetDefaultRgbMapAlgorithm(newValue);
+    });
+  doc::Sprite::SetDefaultRgbMapAlgorithm(quantization.rgbmapAlgorithm());
+
   // Create a connection with the default document preferences grid
   // bounds to sync the default grid bounds for new sprites in the
   // "doc" layer.
@@ -104,7 +112,10 @@ void Preferences::load()
 
 void Preferences::save()
 {
-  ui::assert_ui_thread();
+#ifdef _DEBUG
+  if (ui::UISystem::instance())
+    ui::assert_ui_thread();
+#endif
   app::gen::GlobalPref::save();
 
   for (auto& pair : m_tools)

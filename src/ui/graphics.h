@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -16,8 +16,8 @@
 #include "gfx/rect.h"
 #include "gfx/size.h"
 #include "os/font.h"
-#include "os/paint.h"
 #include "os/surface.h"
+#include "ui/paint.h"
 
 #include <memory>
 #include <string>
@@ -30,21 +30,16 @@ namespace gfx {
 
 namespace os {
   class DrawTextDelegate;
+  struct Sampling;
 }
 
 namespace ui {
-  using os::Paint;
+  class Display;
 
   // Class to render a widget in the screen.
   class Graphics {
   public:
-    enum class DrawMode {
-      Solid,
-      Xor,
-      Checked,
-    };
-
-    Graphics(const os::SurfaceRef& surface, int dx, int dy);
+    Graphics(Display* display, const os::SurfaceRef& surface, int dx, int dy);
     ~Graphics();
 
     int width() const;
@@ -67,18 +62,17 @@ namespace ui {
     void restore();
     gfx::Matrix matrix() const;
 
-    void setDrawMode(DrawMode mode, int param = 0,
-                     const gfx::Color a = gfx::ColorNone,
-                     const gfx::Color b = gfx::ColorNone);
-
     gfx::Color getPixel(int x, int y);
     void putPixel(gfx::Color color, int x, int y);
 
+    void drawHLine(int x, int y, int w, const Paint& paint);
     void drawHLine(gfx::Color color, int x, int y, int w);
+    void drawVLine(int x, int y, int h, const Paint& paint);
     void drawVLine(gfx::Color color, int x, int y, int h);
     void drawLine(gfx::Color color, const gfx::Point& a, const gfx::Point& b);
     void drawPath(gfx::Path& path, const Paint& paint);
 
+    void drawRect(const gfx::Rect& rc, const Paint& paint);
     void drawRect(gfx::Color color, const gfx::Rect& rc);
     void fillRect(gfx::Color color, const gfx::Rect& rc);
     void fillRegion(gfx::Color color, const gfx::Region& rgn);
@@ -88,18 +82,18 @@ namespace ui {
     void drawSurface(os::Surface* surface, int x, int y);
     void drawSurface(os::Surface* surface,
                      const gfx::Rect& srcRect,
-                     const gfx::Rect& dstRect);
+                     const gfx::Rect& dstRect,
+                     const os::Sampling& sampling,
+                     const Paint* paint);
     void drawRgbaSurface(os::Surface* surface, int x, int y);
     void drawRgbaSurface(os::Surface* surface, int srcx, int srcy, int dstx, int dsty, int w, int h);
-    void drawRgbaSurface(os::Surface* surface,
-                         const gfx::Rect& srcRect,
-                         const gfx::Rect& dstRect);
     void drawColoredRgbaSurface(os::Surface* surface, gfx::Color color, int x, int y);
     void drawColoredRgbaSurface(os::Surface* surface, gfx::Color color, int srcx, int srcy, int dstx, int dsty, int w, int h);
     void drawSurfaceNine(os::Surface* surface,
                          const gfx::Rect& src,
                          const gfx::Rect& center,
                          const gfx::Rect& dst,
+                         const bool drawCenter,
                          const Paint* paint = nullptr);
 
     void blit(os::Surface* src, int srcx, int srcy, int dstx, int dsty, int w, int h);
@@ -111,11 +105,10 @@ namespace ui {
     os::Font* font() { return m_font.get(); }
     void setFont(const os::FontRef& font);
 
-    void drawText(base::utf8_const_iterator it,
-                  const base::utf8_const_iterator& end,
-                  gfx::Color fg, gfx::Color bg, const gfx::Point& pt,
-                  os::DrawTextDelegate* delegate);
-    void drawText(const std::string& str, gfx::Color fg, gfx::Color bg, const gfx::Point& pt);
+    void drawText(const std::string& str,
+                  gfx::Color fg, gfx::Color bg,
+                  const gfx::Point& pt,
+                  os::DrawTextDelegate* delegate = nullptr);
     void drawUIText(const std::string& str, gfx::Color fg, gfx::Color bg, const gfx::Point& pt, const int mnemonic);
     void drawAlignedUIText(const std::string& str, gfx::Color fg, gfx::Color bg, const gfx::Rect& rc, const int align);
 
@@ -123,10 +116,16 @@ namespace ui {
     static int measureUITextLength(const std::string& str, os::Font* font);
     gfx::Size fitString(const std::string& str, int maxWidth, int align);
 
+    // Can be used in case that you've accessed/changed the
+    // getInternalSurface() directly and need to specify which area
+    // was modified.
+    void invalidate(const gfx::Rect& bounds);
+
   private:
     gfx::Size doUIStringAlgorithm(const std::string& str, gfx::Color fg, gfx::Color bg, const gfx::Rect& rc, int align, bool draw);
     void dirty(const gfx::Rect& bounds);
 
+    Display* m_display;
     os::SurfaceRef m_surface;
     int m_dx;
     int m_dy;
@@ -138,7 +137,7 @@ namespace ui {
   // Class to draw directly in the screen.
   class ScreenGraphics : public Graphics {
   public:
-    ScreenGraphics();
+    ScreenGraphics(Display* display);
     virtual ~ScreenGraphics();
   };
 
@@ -190,24 +189,6 @@ namespace ui {
     bool m_notEmpty;
 
     DISABLE_COPYING(IntersectClip);
-  };
-
-  class CheckedDrawMode {
-  public:
-    CheckedDrawMode(Graphics* g, int param,
-                    const gfx::Color a,
-                    const gfx::Color b) : m_graphics(g) {
-      m_graphics->setDrawMode(Graphics::DrawMode::Checked, param, a, b);
-    }
-
-    ~CheckedDrawMode() {
-      m_graphics->setDrawMode(Graphics::DrawMode::Solid);
-    }
-
-  private:
-    Graphics* m_graphics;
-
-    DISABLE_COPYING(CheckedDrawMode);
   };
 
   typedef std::shared_ptr<Graphics> GraphicsPtr;

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -67,11 +67,12 @@ public:
 protected:
   void onInitTheme(InitThemeEvent& ev) override {
     LinkLabel::onInitTheme(ev);
-    setStyle(SkinTheme::instance()->styles.recentItem());
+    auto theme = SkinTheme::get(this);
+    setStyle(theme->styles.recentItem());
   }
 
   void onSizeHint(SizeHintEvent& ev) override {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     ui::Style* style = theme->styles.recentFile();
     ui::Style* styleDetail = theme->styles.recentFileDetail();
 
@@ -132,7 +133,7 @@ protected:
   }
 
   void onPaint(PaintEvent& ev) override {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     Graphics* g = ev.graphics();
     gfx::Rect bounds = clientBounds();
     ui::Style* style = theme->styles.recentFile();
@@ -204,8 +205,20 @@ protected:
 
 private:
   gfx::Rect pinBounds(const gfx::Rect& bounds) {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     ui::Style* pinStyle = theme->styles.recentFilePin();
+
+    // We've received some crash reports where it looks like the
+    // parent() is nullptr. This crash was related to some
+    // kPaintMessage messages being still in the queue for
+    // RecentFileItem that were removed from its RecentListBox and
+    // deferred for deletion (deferDelete()) but still have some
+    // living kPaintMessage messages. It was fixed removing
+    // kPaintMessage when Widget::removeChild() is used.
+    ASSERT(parent());
+    if (!parent())
+      return gfx::Rect();
+
     ui::View* view = View::getView(parent());
     const gfx::Size pinSize = theme->calcSizeHint(this, pinStyle);
     const gfx::Rect vp = view->viewportBounds();
@@ -241,8 +254,7 @@ RecentListBox::RecentListBox()
 
 void RecentListBox::rebuildList()
 {
-  while (lastChild()) {
-    auto child = lastChild();
+  while (auto child = lastChild()) {
     removeChild(child);
     child->deferDelete();
   }

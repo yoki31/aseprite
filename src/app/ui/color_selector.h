@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2016-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -20,6 +20,13 @@
 
 #include <atomic>
 #include <cmath>
+
+// TODO We should wrap the SkRuntimeEffect in laf-os, SkRuntimeEffect
+//      and SkRuntimeShaderBuilder might change in future Skia
+//      versions.
+#if SK_ENABLE_SKSL
+  #include "include/effects/SkRuntimeEffect.h"
+#endif
 
 // TODO move this to laf::base
 inline bool cs_double_diff(double a, double b) {
@@ -61,6 +68,11 @@ namespace app {
     void onResize(ui::ResizeEvent& ev) override;
     void onPaint(ui::PaintEvent& ev) override;
 
+    virtual const char* getMainAreaShader() { return nullptr; }
+    virtual const char* getBottomBarShader() { return nullptr; }
+#if SK_ENABLE_SKSL
+    virtual void setShaderParams(SkRuntimeShaderBuilder& builder, bool main) { }
+#endif
     virtual app::Color getMainAreaColor(const int u, const int umax,
                                         const int v, const int vmax) = 0;
     virtual app::Color getBottomBarColor(const int u, const int umax) = 0;
@@ -92,6 +104,11 @@ namespace app {
     // atomic because we need atomic bitwise operations.
     std::atomic<int> m_paintFlags;
 
+  protected:
+#if SK_ENABLE_SKSL
+    void resetBottomEffect();
+#endif
+
   private:
     app::Color getAlphaBarColor(const int u, const int umax);
     void onPaintAlphaBar(ui::Graphics* g, const gfx::Rect& rc);
@@ -100,6 +117,12 @@ namespace app {
     gfx::Rect alphaBarBounds() const;
 
     void updateColorSpace();
+
+#if SK_ENABLE_SKSL
+    static const char* getAlphaBarShader();
+    bool buildEffects();
+    sk_sp<SkRuntimeEffect> buildEffect(const char* code);
+#endif
 
     // Internal flag used to lock the modification of m_color.
     // E.g. When the user picks a color harmony, we don't want to
@@ -117,6 +140,13 @@ namespace app {
     ui::Timer m_timer;
 
     obs::scoped_connection m_appConn;
+
+#if SK_ENABLE_SKSL
+    // Shaders
+    sk_sp<SkRuntimeEffect> m_mainEffect;
+    sk_sp<SkRuntimeEffect> m_bottomEffect;
+    static sk_sp<SkRuntimeEffect> m_alphaEffect;
+#endif
   };
 
 } // namespace app

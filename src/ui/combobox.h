@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -86,7 +86,6 @@ namespace ui {
     void openListBox();
     void closeListBox();
     void switchListBox();
-    gfx::Rect getListBoxPos() const;
 
     // Signals
     obs::signal<void()> Change;
@@ -115,7 +114,8 @@ namespace ui {
     virtual void onEnterOnEditableEntry();
 
   private:
-    void onButtonClick(Event& ev);
+    void updateListBoxPos();
+    void onButtonClick();
     void filterMessages();
     void removeMessageFilters();
     void putSelectedItemAsCustomWidget();

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2017-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -26,10 +26,16 @@
 #include "base/fs.h"
 #include "base/fstream_path.h"
 #include "render/dithering_matrix.h"
+#include "ui/widget.h"
+
+#if ENABLE_SENTRY
+#include "app/sentry_wrapper.h"
+#endif
 
 #ifdef ENABLE_SCRIPTING
   #include "app/script/engine.h"
   #include "app/script/luacpp.h"
+  #include "app/script/require.h"
 #endif
 
 #include "archive.h"
@@ -40,6 +46,8 @@
 #include <queue>
 #include <sstream>
 #include <string>
+
+#include "base/log.h"
 
 namespace app {
 
@@ -257,15 +265,21 @@ void Extension::executeExitActions()
 #endif // ENABLE_SCRIPTING
 }
 
+void Extension::addKeys(const std::string& id, const std::string& path)
+{
+  m_keys[id] = path;
+  updateCategory(Category::Keys);
+}
+
 void Extension::addLanguage(const std::string& id, const std::string& path)
 {
   m_languages[id] = path;
   updateCategory(Category::Languages);
 }
 
-void Extension::addTheme(const std::string& id, const std::string& path)
+void Extension::addTheme(const std::string& id, const std::string& path, const std::string& variant)
 {
-  m_themes[id] = path;
+  m_themes[id] = ThemeInfo(path, variant);
   updateCategory(Category::Themes);
 }
 
@@ -307,6 +321,35 @@ void Extension::removeCommand(const std::string& id)
   }
 }
 
+void Extension::addMenuGroup(const std::string& id)
+{
+  PluginItem item;
+  item.type = PluginItem::MenuGroup;
+  item.id = id;
+  m_plugin.items.push_back(item);
+}
+
+void Extension::removeMenuGroup(const std::string& id)
+{
+  for (auto it=m_plugin.items.begin(); it != m_plugin.items.end(); ) {
+    if (it->type == PluginItem::MenuGroup &&
+        it->id == id) {
+      it = m_plugin.items.erase(it);
+    }
+    else {
+      ++it;
+    }
+  }
+}
+
+void Extension::addMenuSeparator(ui::Widget* widget)
+{
+  PluginItem item;
+  item.type = PluginItem::MenuSeparator;
+  item.widget = widget;
+  m_plugin.items.push_back(item);
+}
+
 #endif
 
 bool Extension::canBeDisabled() const
@@ -326,14 +369,12 @@ bool Extension::canBeUninstalled() const
 
 void Extension::enable(const bool state)
 {
-  // Do nothing
-  if (m_isEnabled == state)
-    return;
+  if (m_isEnabled != state) {
+    set_config_bool("extensions", m_name.c_str(), state);
+    flush_config_file();
 
-  set_config_bool("extensions", m_name.c_str(), state);
-  flush_config_file();
-
-  m_isEnabled = state;
+    m_isEnabled = state;
+  }
 
 #ifdef ENABLE_SCRIPTING
   if (hasScripts()) {
@@ -347,7 +388,7 @@ void Extension::enable(const bool state)
 #endif // ENABLE_SCRIPTING
 }
 
-void Extension::uninstall()
+void Extension::uninstall(const DeletePluginPref delPref)
 {
   if (!m_isInstalled)
     return;
@@ -359,15 +400,18 @@ void Extension::uninstall()
   TRACE("EXT: Uninstall extension '%s' from '%s'...\n",
         m_name.c_str(), m_path.c_str());
 
+  // Execute exit actions of scripts
+  executeExitActions();
+
   // Remove all files inside the extension path
-  uninstallFiles(m_path);
-  ASSERT(!base::is_directory(m_path));
+  uninstallFiles(m_path, delPref);
 
   m_isEnabled = false;
   m_isInstalled = false;
 }
 
-void Extension::uninstallFiles(const std::string& path)
+void Extension::uninstallFiles(const std::string& path,
+                               const DeletePluginPref delPref)
 {
 #if 1 // Read the list of files to be uninstalled from __info.json file
 
@@ -392,11 +436,17 @@ void Extension::uninstallFiles(const std::string& path)
     }
   }
 
-  // Delete __pref.lua file
+  // Delete __pref.lua file (only if specified, e.g. if the user is
+  // updating the extension, the preferences should be kept).
+  bool hasPrefFile = false;
   {
     std::string fn = base::join_path(path, kPrefLua);
-    if (base::is_file(fn))
-      base::delete_file(fn);
+    if (base::is_file(fn)) {
+      if (delPref == DeletePluginPref::kYes)
+        base::delete_file(fn);
+      else
+        hasPrefFile = true;
+    }
   }
 
   std::sort(installedDirs.begin(),
@@ -408,7 +458,13 @@ void Extension::uninstallFiles(const std::string& path)
 
   for (const auto& dir : installedDirs) {
     TRACE("EXT: Deleting directory '%s'\n", dir.c_str());
-    base::remove_directory(dir);
+    try {
+      base::remove_directory(dir);
+    }
+    catch (const std::exception& ex) {
+      LOG(ERROR, "RECO: Extension subdirectory cannot be removed, it's not empty.\n"
+                 "      Error: %s\n", ex.what());
+    }
   }
 
   // Delete __info.json file if it does exist (e.g. maybe the
@@ -421,7 +477,15 @@ void Extension::uninstallFiles(const std::string& path)
   }
 
   TRACE("EXT: Deleting extension directory '%s'\n", path.c_str());
-  base::remove_directory(path);
+  if (!hasPrefFile) {
+    try {
+      base::remove_directory(path);
+    }
+    catch (const std::exception& ex) {
+      LOG(ERROR, "RECO: Extension directory cannot be removed, it's not empty.\n"
+                 "      Error: %s\n", ex.what());
+    }
+  }
 
 #else // The following code delete the whole "path",
       // we prefer the __info.json approach.
@@ -433,7 +497,7 @@ void Extension::uninstallFiles(const std::string& path)
       base::delete_file(fn);
     }
     else if (base::is_directory(fn)) {
-      uninstallFiles(fn);
+      uninstallFiles(fn, deleteUserPref);
     }
   }
 
@@ -456,8 +520,10 @@ bool Extension::isDefaultTheme() const
 
 void Extension::updateCategory(const Category newCategory)
 {
-  if (m_category == Category::None)
+  if (m_category == Category::None ||
+      m_category == Category::Keys) {
     m_category = newCategory;
+  }
   else if (m_category != newCategory)
     m_category = Category::Multiple;
 }
@@ -562,6 +628,10 @@ void Extension::initScripts()
   script::push_plugin(L, this);
   m_plugin.pluginRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
+  // Set the _PLUGIN global so require() can find .lua files from the
+  // plugin path.
+  script::SetPluginForRequire setPlugin(L, m_plugin.pluginRef);
+
   // Read plugin.preferences value
   {
     std::string fn = base::join_path(m_path, kPrefLua);
@@ -600,7 +670,7 @@ void Extension::initScripts()
       lua_pop(L, 1);
     }
 
-    // Call the init() function of thi sscript with a Plugin object as first parameter
+    // Call the init() function of this script with a Plugin object as first parameter
     if (lua_getglobal(L, "init") == LUA_TFUNCTION) {
       // Call init(plugin)
       lua_rawgeti(L, LUA_REGISTRYINDEX, m_plugin.pluginRef);
@@ -654,14 +724,16 @@ void Extension::exitScripts()
     m_plugin.pluginRef = LUA_REFNIL;
   }
 
-  // Remove plugin items automatically
-  for (const auto& item : m_plugin.items) {
+  // Remove plugin items automatically from back to front (in the
+  // reverse order that they were added).
+  for (auto it=m_plugin.items.rbegin(), end=m_plugin.items.rend(); it!=end; ++it) {
+    auto& item = *it;
+
     switch (item.type) {
       case PluginItem::Command: {
         auto cmds = Commands::instance();
         auto cmd = cmds->byId(item.id.c_str());
         ASSERT(cmd);
-
         if (cmd) {
 #ifdef ENABLE_UI
           // TODO use a signal
@@ -676,8 +748,31 @@ void Extension::exitScripts()
         }
         break;
       }
+
+#ifdef ENABLE_UI
+
+      case PluginItem::MenuSeparator:
+        ASSERT(item.widget);
+        ASSERT(item.widget->parent());
+        if (item.widget &&
+            item.widget->parent()) {
+          // TODO use a signal
+          AppMenus::instance()->removeMenuItemFromGroup(item.widget);
+          ASSERT(!item.widget->parent());
+          item.widget = nullptr;
+        }
+        break;
+
+      case PluginItem::MenuGroup:
+        // TODO use a signal
+        AppMenus::instance()->removeMenuGroup(item.id);
+        break;
+
+#endif // ENABLE_UI
+
     }
   }
+
   m_plugin.items.clear();
 }
 
@@ -789,7 +884,7 @@ std::string Extensions::themePath(const std::string& themeId)
 
     auto it = ext->themes().find(themeId);
     if (it != ext->themes().end())
-      return it->second;
+      return it->second.path;
   }
   return std::string();
 }
@@ -852,9 +947,10 @@ void Extensions::enableExtension(Extension* extension, const bool state)
   generateExtensionSignals(extension);
 }
 
-void Extensions::uninstallExtension(Extension* extension)
+void Extensions::uninstallExtension(Extension* extension,
+                                    const DeletePluginPref delPref)
 {
-  extension->uninstall();
+  extension->uninstall(delPref);
   generateExtensionSignals(extension);
 
   auto it = std::find(m_extensions.begin(),
@@ -1005,17 +1101,46 @@ Extension* Extensions::loadExtension(const std::string& path,
 
   LOG("EXT: Extension '%s' loaded\n", name.c_str());
 
-  std::unique_ptr<Extension> extension(
-    new Extension(path,
-                  name,
-                  version,
-                  displayName,
-                  // Extensions are enabled by default
-                  get_config_bool("extensions", name.c_str(), true),
-                  isBuiltinExtension));
+#if ENABLE_SENTRY
+  if (!isBuiltinExtension) {
+    std::map<std::string, std::string> data = { { "name", name },
+                                                { "version", version } };
+    if (json["author"].is_object()) {
+      data["url"] = json["author"]["url"].string_value();
+    }
+    Sentry::addBreadcrumb("Load extension", data);
+  }
+#endif
+
+  auto extension = std::make_unique<Extension>(
+    path,
+    name,
+    version,
+    displayName,
+    // Extensions are enabled by default
+    get_config_bool("extensions", name.c_str(), true),
+    isBuiltinExtension);
 
   auto contributes = json["contributes"];
   if (contributes.is_object()) {
+    // Keys
+    auto keys = contributes["keys"];
+    if (keys.is_array()) {
+      for (const auto& key : keys.array_items()) {
+        std::string keyId = key["id"].string_value();
+        std::string keyPath = key["path"].string_value();
+
+        // The path must be always relative to the extension
+        keyPath = base::join_path(path, keyPath);
+
+        LOG("EXT: New keyboard shortcuts '%s' in '%s'\n",
+            keyId.c_str(),
+            keyPath.c_str());
+
+        extension->addKeys(keyId, keyPath);
+      }
+    }
+
     // Languages
     auto languages = contributes["languages"];
     if (languages.is_array()) {
@@ -1026,7 +1151,7 @@ Extension* Extensions::loadExtension(const std::string& path,
         // The path must be always relative to the extension
         langPath = base::join_path(path, langPath);
 
-        LOG("EXT: New language '%s' in '%s'\n",
+        LOG("EXT: New language id=%s path=%s\n",
             langId.c_str(),
             langPath.c_str());
 
@@ -1040,15 +1165,17 @@ Extension* Extensions::loadExtension(const std::string& path,
       for (const auto& theme : themes.array_items()) {
         std::string themeId = theme["id"].string_value();
         std::string themePath = theme["path"].string_value();
+        std::string themeVariant = theme["variant"].string_value();
 
         // The path must be always relative to the extension
         themePath = base::join_path(path, themePath);
 
-        LOG("EXT: New theme '%s' in '%s'\n",
+        LOG("EXT: New theme id=%s path=%s variant=%s\n",
             themeId.c_str(),
-            themePath.c_str());
+            themePath.c_str(),
+            themeVariant.c_str());
 
-        extension->addTheme(themeId, themePath);
+        extension->addTheme(themeId, themePath, themeVariant);
       }
     }
 
@@ -1062,7 +1189,7 @@ Extension* Extensions::loadExtension(const std::string& path,
         // The path must be always relative to the extension
         palPath = base::join_path(path, palPath);
 
-        LOG("EXT: New palette '%s' in '%s'\n",
+        LOG("EXT: New palette id=%s path=%s\n",
             palId.c_str(),
             palPath.c_str());
 
@@ -1083,7 +1210,7 @@ Extension* Extensions::loadExtension(const std::string& path,
         // The path must be always relative to the extension
         matPath = base::join_path(path, matPath);
 
-        LOG("EXT: New dithering matrix '%s' in '%s'\n",
+        LOG("EXT: New dithering matrix id=%s path=%s\n",
             matId.c_str(),
             matPath.c_str());
 
@@ -1103,7 +1230,7 @@ Extension* Extensions::loadExtension(const std::string& path,
         // The path must be always relative to the extension
         scriptPath = base::join_path(path, scriptPath);
 
-        LOG("EXT: New script '%s'\n", scriptPath.c_str());
+        LOG("EXT: New script path=%s\n", scriptPath.c_str());
 
         extension->addScript(scriptPath);
       }
@@ -1116,7 +1243,7 @@ Extension* Extensions::loadExtension(const std::string& path,
       // The path must be always relative to the extension
       scriptPath = base::join_path(path, scriptPath);
 
-      LOG("EXT: New script '%s'\n", scriptPath.c_str());
+      LOG("EXT: New script path=%s\n", scriptPath.c_str());
 
       extension->addScript(scriptPath);
     }
@@ -1130,6 +1257,7 @@ Extension* Extensions::loadExtension(const std::string& path,
 
 void Extensions::generateExtensionSignals(Extension* extension)
 {
+  if (extension->hasKeys()) KeysChange(extension);
   if (extension->hasLanguages()) LanguagesChange(extension);
   if (extension->hasThemes()) ThemesChange(extension);
   if (extension->hasPalettes()) PalettesChange(extension);

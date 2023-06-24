@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2019  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2018  David Capello
 //
 // This program is distributed under the terms of
@@ -12,16 +12,20 @@
 #include "app/cmd/set_layer_blend_mode.h"
 #include "app/cmd/set_layer_name.h"
 #include "app/cmd/set_layer_opacity.h"
+#include "app/cmd/set_layer_tileset.h"
 #include "app/doc.h"
 #include "app/doc_api.h"
+#include "app/script/blend_mode.h"
 #include "app/script/docobj.h"
 #include "app/script/engine.h"
 #include "app/script/luacpp.h"
 #include "app/script/userdata.h"
 #include "app/tx.h"
-#include "base/clamp.h"
 #include "doc/layer.h"
+#include "doc/layer_tilemap.h"
 #include "doc/sprite.h"
+#include "doc/tileset.h"
+#include "doc/tilesets.h"
 
 namespace app {
 namespace script {
@@ -32,9 +36,9 @@ namespace {
 
 int Layer_eq(lua_State* L)
 {
-  const auto a = get_docobj<Layer>(L, 1);
-  const auto b = get_docobj<Layer>(L, 2);
-  lua_pushboolean(L, a->id() == b->id());
+  const auto a = may_get_docobj<Layer>(L, 1);
+  const auto b = may_get_docobj<Layer>(L, 2);
+  lua_pushboolean(L, (!a && !b) || (a && b && a->id() == b->id()));
   return 1;
 }
 
@@ -46,6 +50,13 @@ int Layer_cel(lua_State* L)
     push_docobj<Cel>(L, cel);
   else
     lua_pushnil(L);
+  return 1;
+}
+
+int Layer_get_id(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  lua_pushinteger(L, layer->id());
   return 1;
 }
 
@@ -131,7 +142,9 @@ int Layer_get_blendMode(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
   if (layer->isImage()) {
-    lua_pushinteger(L, (int)static_cast<LayerImage*>(layer)->blendMode());
+    lua_pushinteger(
+      L, int(base::convert_to<app::script::BlendMode>(
+               static_cast<LayerImage*>(layer)->blendMode())));
     return 1;
   }
   else
@@ -149,6 +162,13 @@ int Layer_get_isGroup(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
   lua_pushboolean(L, layer->isGroup());
+  return 1;
+}
+
+int Layer_get_isTilemap(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  lua_pushboolean(L, layer->isTilemap());
   return 1;
 }
 
@@ -215,6 +235,16 @@ int Layer_get_cels(lua_State* L)
   return 1;
 }
 
+int Layer_get_tileset(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isTilemap())
+    push_tileset(L, static_cast<doc::LayerTilemap*>(layer)->tileset());
+  else
+    lua_pushnil(L);
+  return 1;
+}
+
 int Layer_set_name(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
@@ -242,11 +272,11 @@ int Layer_set_opacity(lua_State* L)
 int Layer_set_blendMode(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
-  const int blendMode = lua_tointeger(L, 2);
+  auto blendMode = app::script::BlendMode(lua_tointeger(L, 2));
   if (layer->isImage()) {
     Tx tx;
     tx(new cmd::SetLayerBlendMode(static_cast<LayerImage*>(layer),
-                                  (doc::BlendMode)blendMode));
+                                  base::convert_to<doc::BlendMode>(blendMode)));
     tx.commit();
   }
   return 0;
@@ -272,7 +302,7 @@ int Layer_set_stackIndex(lua_State* L)
   }
 
   if (newStackIndex-1 < int(parent->layers().size())) {
-    beforeThis = parent->layers()[base::clamp(newStackIndex-1, 0, (int)parent->layers().size())];
+    beforeThis = parent->layers()[std::clamp(newStackIndex-1, 0, (int)parent->layers().size())];
   }
   else {
     beforeThis = nullptr;
@@ -359,6 +389,27 @@ int Layer_set_parent(lua_State* L)
   return 0;
 }
 
+int Layer_set_tileset(lua_State* L)
+{
+  auto layer = get_docobj<Layer>(L, 1);
+  if (layer->isTilemap()) {
+    auto tilemap = static_cast<doc::LayerTilemap*>(layer);
+    doc::tileset_index tsi = tilemap->tilesetIndex();
+
+    if (auto tileset = may_get_docobj<Tileset>(L, 2))
+      tsi = layer->sprite()->tilesets()->getIndex(tileset);
+    else if (lua_isinteger(L, 2))
+      tsi = lua_tointeger(L, 2);
+
+    if (tsi != tilemap->tilesetIndex()) {
+      Tx tx;
+      tx(new cmd::SetLayerTileset(tilemap, tsi));
+      tx.commit();
+    }
+  }
+  return 0;
+}
+
 const luaL_Reg Layer_methods[] = {
   { "__eq", Layer_eq },
   { "cel", Layer_cel },
@@ -366,6 +417,7 @@ const luaL_Reg Layer_methods[] = {
 };
 
 const Property Layer_properties[] = {
+  { "id", Layer_get_id, nullptr },
   { "sprite", Layer_get_sprite, nullptr },
   { "parent", Layer_get_parent, Layer_set_parent },
   { "layers", Layer_get_layers, nullptr },
@@ -377,6 +429,7 @@ const Property Layer_properties[] = {
   { "blendMode", Layer_get_blendMode, Layer_set_blendMode },
   { "isImage", Layer_get_isImage, nullptr },
   { "isGroup", Layer_get_isGroup, nullptr },
+  { "isTilemap", Layer_get_isTilemap, nullptr },
   { "isTransparent", Layer_get_isTransparent, nullptr },
   { "isBackground", Layer_get_isBackground, nullptr },
   { "isEditable", Layer_get_isEditable, Layer_set_isEditable },
@@ -388,6 +441,8 @@ const Property Layer_properties[] = {
   { "cels", Layer_get_cels, nullptr },
   { "color", UserData_get_color<Layer>, UserData_set_color<Layer> },
   { "data", UserData_get_text<Layer>, UserData_set_text<Layer> },
+  { "properties", UserData_get_properties<Layer>, UserData_set_properties<Layer> },
+  { "tileset", Layer_get_tileset, Layer_set_tileset },
   { nullptr, nullptr, nullptr }
 };
 

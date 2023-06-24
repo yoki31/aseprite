@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -8,6 +8,10 @@
 #ifndef APP_DOC_OBSERVER_H_INCLUDED
 #define APP_DOC_OBSERVER_H_INCLUDED
 #pragma once
+
+namespace doc {
+  class Remap;
+}
 
 namespace app {
   class Doc;
@@ -61,6 +65,9 @@ namespace app {
     virtual void onCelFrameChanged(DocEvent& ev) { }
     virtual void onCelPositionChanged(DocEvent& ev) { }
     virtual void onCelOpacityChange(DocEvent& ev) { }
+    virtual void onCelZIndexChange(DocEvent& ev) { }
+
+    virtual void onUserDataChange(DocEvent& ev) { }
 
     virtual void onFrameDurationChanged(DocEvent& ev) { }
 
@@ -75,11 +82,26 @@ namespace app {
     virtual void onSelectionChanged(DocEvent& ev) { }
     virtual void onSelectionBoundariesChanged(DocEvent& ev) { }
 
-    // Tags
+    // When the tag range changes
     virtual void onTagChange(DocEvent& ev) { }
+
+    // When the tag is renamed
+    virtual void onTagRename(DocEvent& ev) { }
 
     // Slices
     virtual void onSliceNameChange(DocEvent& ev) { }
+
+    // The tileset has changed.
+    virtual void onTilesetChanged(DocEvent& ev) { }
+
+    // The collapsed/expanded flag of a specific layer changed.
+    virtual void onLayerCollapsedChanged(DocEvent& ev) { }
+
+    // The tileset was remapped (e.g. when tiles are re-ordered).
+    virtual void onRemapTileset(DocEvent& ev, const doc::Remap& remap) { }
+
+    // When the tile management plugin property is changed.
+    virtual void onTileManagementPluginChange(DocEvent& ev) { }
 
   };
 

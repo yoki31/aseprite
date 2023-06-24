@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -30,6 +30,8 @@
 #define FILE_SUPPORT_TAGS               0x00001000
 #define FILE_SUPPORT_BIG_PALETTES       0x00002000 // Palettes w/more than 256 colors
 #define FILE_SUPPORT_PALETTE_WITH_ALPHA 0x00004000
+#define FILE_ENCODE_ABSTRACT_IMAGE      0x00008000 // Use the new FileAbstractImage
+#define FILE_GIF_ANI_LIMITATIONS        0x00010000
 
 namespace app {
 
@@ -61,9 +63,6 @@ namespace app {
     // Returns false cancelled the operation.
     bool postLoad(FileOp* fop);
 
-    // Destroys the custom data stored in "fop->format_data" field.
-    void destroyData(FileOp* fop);
-
     // Returns extra options for this format. It can return != NULL
     // only if flags() returns FILE_SUPPORT_GET_FORMAT_OPTIONS.
     FormatOptionsPtr askUserForFormatOptions(FileOp* fop) {
@@ -86,7 +85,6 @@ namespace app {
 #ifdef ENABLE_SAVE
     virtual bool onSave(FileOp* fop) = 0;
 #endif
-    virtual void onDestroyData(FileOp* fop) { }
 
     virtual FormatOptionsPtr onAskUserForFormatOptions(FileOp* fop) {
       return FormatOptionsPtr(nullptr);
