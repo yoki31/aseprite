@@ -1,18 +1,17 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2022  Igara Studio S.A.
 // Copyright (C) 2017  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/slider2.h"
 
 #include "app/ui/skin/skin_property.h"
-#include "base/clamp.h"
 #include "ui/manager.h"
 #include "ui/message.h"
 
@@ -29,10 +28,7 @@ Slider2::Slider2Entry::Slider2Entry(ui::Slider* slider)
 bool Slider2::Slider2Entry::onProcessMessage(ui::Message* msg)
 {
   switch (msg->type()) {
-
-    case ui::kFocusEnterMessage:
-      m_recentFocus = true;
-      break;
+    case ui::kFocusEnterMessage: m_recentFocus = true; break;
 
     case ui::kKeyDownMessage:
       if (ui::Entry::onProcessMessage(msg))
@@ -44,19 +40,17 @@ bool Slider2::Slider2Entry::onProcessMessage(ui::Message* msg)
         switch (scancode) {
           // Enter just remove the focus
           case ui::kKeyEnter:
-          case ui::kKeyEnterPad:
-            releaseFocus();
-            return true;
+          case ui::kKeyEnterPad: releaseFocus(); return true;
 
           case ui::kKeyDown:
-          case ui::kKeyUp: {
+          case ui::kKeyUp:       {
             int value = textInt();
             if (scancode == ui::kKeyDown)
               --value;
             else
               ++value;
 
-            setTextf("%d", base::clamp(value, minValue(), maxValue()));
+            setTextf("%d", std::clamp(value, minValue(), maxValue()));
             selectAllText();
 
             onChange();
@@ -71,8 +65,7 @@ bool Slider2::Slider2Entry::onProcessMessage(ui::Message* msg)
         // Note: The default ui::Manager handles focus movement
         // shortcuts only for foreground windows.
         // TODO maybe that should change
-        if (hasFocus() &&
-            manager()->processFocusMovementMessage(msg))
+        if (hasFocus() && manager()->processFocusMovementMessage(msg))
           return true;
       }
       return false;
@@ -88,16 +81,14 @@ bool Slider2::Slider2Entry::onProcessMessage(ui::Message* msg)
   return result;
 }
 
-Slider2::Slider2(int min, int max, int value)
-  : m_slider(min, max, value)
-  , m_entry(&m_slider)
+Slider2::Slider2(int min, int max, int value) : m_slider(min, max, value), m_entry(&m_slider)
 {
   m_slider.setExpansive(true);
   m_slider.setSizeHint(gfx::Size(128, 0));
   skin::get_skin_property(&m_entry)->setLook(skin::MiniLook);
 
-  m_slider.Change.connect([this]{ onSliderChange(); });
-  m_entry.Change.connect([this]{ onEntryChange(); });
+  m_slider.Change.connect([this] { onSliderChange(); });
+  m_entry.Change.connect([this] { onEntryChange(); });
 
   addChild(&m_slider);
   addChild(&m_entry);
@@ -119,7 +110,7 @@ void Slider2::onSliderChange()
 void Slider2::onEntryChange()
 {
   int v = m_entry.textInt();
-  v = base::clamp(v, m_slider.getMinValue(), m_slider.getMaxValue());
+  v = std::clamp(v, m_slider.getMinValue(), m_slider.getMaxValue());
   m_slider.setValue(v);
 
   onChange();

@@ -1,40 +1,48 @@
 // Aseprite UI Library
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "ui/entry.h"
 
-#include "base/clamp.h"
 #include "base/string.h"
 #include "os/draw_text.h"
 #include "os/font.h"
 #include "os/system.h"
-#include "ui/manager.h"
+#include "ui/display.h"
 #include "ui/menu.h"
 #include "ui/message.h"
 #include "ui/scale.h"
 #include "ui/size_hint_event.h"
 #include "ui/system.h"
 #include "ui/theme.h"
+#include "ui/timer.h"
 #include "ui/widget.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdarg>
 #include <cstdio>
+#include <memory>
 
 namespace ui {
 
+// Shared timer between all entries.
+static std::unique_ptr<Timer> s_timer;
+
+static inline bool is_word_char(int ch)
+{
+  return (ch && !std::isspace(ch) && !std::ispunct(ch));
+}
+
 Entry::Entry(const int maxsize, const char* format, ...)
   : Widget(kEntryWidget)
-  , m_timer(500, this)
   , m_maxsize(maxsize)
   , m_caret(0)
   , m_scroll(0)
@@ -49,11 +57,11 @@ Entry::Entry(const int maxsize, const char* format, ...)
   enableFlags(CTRL_RIGHT_CLICK);
 
   // formatted string
-  char buf[4096];               // TODO buffer overflow
+  char buf[4096]; // TODO buffer overflow
   if (format) {
     va_list ap;
     va_start(ap, format);
-    vsprintf(buf, format, ap);
+    std::vsnprintf(buf, sizeof(buf), format, ap);
     va_end(ap);
   }
   // empty string
@@ -71,6 +79,7 @@ Entry::Entry(const int maxsize, const char* format, ...)
 
 Entry::~Entry()
 {
+  stopTimer();
 }
 
 void Entry::setMaxTextLength(const int maxsize)
@@ -92,28 +101,28 @@ void Entry::showCaret()
 {
   m_hidden = false;
   if (shouldStartTimer(hasFocus()))
-    m_timer.start();
+    startTimer();
   invalidate();
 }
 
 void Entry::hideCaret()
 {
   m_hidden = true;
-  m_timer.stop();
+  stopTimer();
   invalidate();
 }
 
 int Entry::lastCaretPos() const
 {
-  return int(m_boxes.size()-1);
+  return int(m_boxes.size() - 1);
 }
 
 void Entry::setCaretPos(int pos)
 {
   gfx::Size caretSize = theme()->getEntryCaretSize(this);
   int textlen = lastCaretPos();
-  m_caret = base::clamp(pos, 0, textlen);
-  m_scroll = base::clamp(m_scroll, 0, textlen);
+  m_caret = std::clamp(pos, 0, textlen);
+  m_scroll = std::clamp(m_scroll, 0, textlen);
 
   // Backward scroll
   if (m_caret < m_scroll)
@@ -123,7 +132,7 @@ void Entry::setCaretPos(int pos)
     int xLimit = bounds().x2() - border().right();
     while (m_caret > m_scroll) {
       int segmentWidth = 0;
-      for (int j=m_scroll; j<m_caret; ++j)
+      for (int j = m_scroll; j < m_caret; ++j)
         segmentWidth += m_boxes[j].width;
 
       int x = bounds().x + border().left() + segmentWidth + caretSize.w;
@@ -135,7 +144,7 @@ void Entry::setCaretPos(int pos)
   }
 
   if (shouldStartTimer(hasFocus()))
-    m_timer.start();
+    startTimer();
   m_state = true;
 
   invalidate();
@@ -153,7 +162,7 @@ void Entry::selectText(int from, int to)
 
   m_select = from;
   setCaretPos(from); // to move scroll
-  setCaretPos((to >= 0)? to: end+to+1);
+  setCaretPos((to >= 0) ? to : end + to + 1);
 
   invalidate();
 }
@@ -174,7 +183,7 @@ std::string Entry::selectedText() const
   Range range = selectedRange();
   if (!range.isEmpty())
     return text().substr(m_boxes[range.from].from,
-                         m_boxes[range.to-1].to - m_boxes[range.from].from);
+                         m_boxes[range.to - 1].to - m_boxes[range.from].from);
   else
     return std::string();
 }
@@ -182,23 +191,29 @@ std::string Entry::selectedText() const
 Entry::Range Entry::selectedRange() const
 {
   Range range;
-  if ((m_select >= 0) &&
-      (m_caret != m_select)) {
+  if ((m_select >= 0) && (m_caret != m_select)) {
     range.from = std::min(m_caret, m_select);
-    range.to   = std::max(m_caret, m_select);
+    range.to = std::max(m_caret, m_select);
 
-    ASSERT(range.from >= 0 && range.from < int(m_boxes.size()));
-    ASSERT(range.to   >= 0 && range.to   <= int(m_boxes.size()));
+    range.from = std::clamp(range.from, 0, std::max(0, int(m_boxes.size()) - 1));
+    range.to = std::clamp(range.to, 0, int(m_boxes.size()));
   }
   return range;
 }
 
 void Entry::setSuffix(const std::string& suffix)
 {
-  if (m_suffix != suffix) {
-    m_suffix = suffix;
-    invalidate();
-  }
+  // No-op cases
+  if ((!m_suffix && suffix.empty()) || (m_suffix && *m_suffix == suffix))
+    return;
+
+  m_suffix = std::make_unique<std::string>(suffix);
+  invalidate();
+}
+
+std::string Entry::getSuffix()
+{
+  return (m_suffix ? *m_suffix : std::string());
 }
 
 void Entry::setTranslateDeadKeys(bool state)
@@ -208,10 +223,14 @@ void Entry::setTranslateDeadKeys(bool state)
 
 void Entry::getEntryThemeInfo(int* scroll, int* caret, int* state, Range* range) const
 {
-  if (scroll) *scroll = m_scroll;
-  if (caret) *caret = m_caret;
-  if (state) *state = !m_hidden && m_state;
-  if (range) *range = selectedRange();
+  if (scroll)
+    *scroll = m_scroll;
+  if (caret)
+    *caret = m_caret;
+  if (state)
+    *state = !m_hidden && m_state;
+  if (range)
+    *range = selectedRange();
 }
 
 gfx::Rect Entry::getEntryTextBounds() const
@@ -222,18 +241,17 @@ gfx::Rect Entry::getEntryTextBounds() const
 bool Entry::onProcessMessage(Message* msg)
 {
   switch (msg->type()) {
-
     case kTimerMessage:
-      if (hasFocus() && static_cast<TimerMessage*>(msg)->timer() == &m_timer) {
+      if (hasFocus() && static_cast<TimerMessage*>(msg)->timer() == s_timer.get()) {
         // Blinking caret
-        m_state = m_state ? false: true;
+        m_state = (m_state ? false : true);
         invalidate();
       }
       break;
 
     case kFocusEnterMessage:
       if (shouldStartTimer(true))
-        m_timer.start();
+        startTimer();
 
       m_state = true;
       invalidate();
@@ -254,7 +272,7 @@ bool Entry::onProcessMessage(Message* msg)
     case kFocusLeaveMessage:
       invalidate();
 
-      m_timer.stop();
+      stopTimer();
 
       if (!m_lock_selection)
         deselectText();
@@ -274,7 +292,6 @@ bool Entry::onProcessMessage(Message* msg)
         KeyScancode scancode = keymsg->scancode();
 
         switch (scancode) {
-
           case kKeyLeft:
             if (msg->ctrlPressed() || msg->altPressed())
               cmd = EntryCmd::BackwardWord;
@@ -293,13 +310,9 @@ bool Entry::onProcessMessage(Message* msg)
               cmd = EntryCmd::ForwardChar;
             break;
 
-          case kKeyHome:
-            cmd = EntryCmd::BeginningOfLine;
-            break;
+          case kKeyHome: cmd = EntryCmd::BeginningOfLine; break;
 
-          case kKeyEnd:
-            cmd = EntryCmd::EndOfLine;
-            break;
+          case kKeyEnd:  cmd = EntryCmd::EndOfLine; break;
 
           case kKeyDel:
             if (msg->shiftPressed())
@@ -344,13 +357,14 @@ bool Entry::onProcessMessage(Message* msg)
 
         if (cmd == EntryCmd::NoOp) {
           if (keymsg->unicodeChar() >= 32) {
-            executeCmd(EntryCmd::InsertChar, keymsg->unicodeChar(),
-                       (msg->shiftPressed()) ? true: false);
+            executeCmd(EntryCmd::InsertChar,
+                       keymsg->unicodeChar(),
+                       (msg->shiftPressed()) ? true : false);
 
             // Select dead-key
             if (keymsg->isDeadKey()) {
               if (lastCaretPos() < m_maxsize)
-                selectText(m_caret-1, m_caret);
+                selectText(m_caret - 1, m_caret);
             }
             return true;
           }
@@ -361,18 +375,24 @@ bool Entry::onProcessMessage(Message* msg)
             return true;
           }
           else {
-            break;              // Propagate to manager
+            break; // Propagate to manager
           }
         }
 
-        executeCmd(cmd, keymsg->unicodeChar(),
-                   (msg->shiftPressed()) ? true: false);
+        executeCmd(cmd, keymsg->unicodeChar(), (msg->shiftPressed()) ? true : false);
         return true;
       }
       break;
 
     case kMouseDownMessage:
       captureMouse();
+
+      // Disable selecting words if we click again (only
+      // double-clicking enables selecting words again).
+      if (!m_selecting_words.isEmpty())
+        m_selecting_words.reset();
+
+      [[fallthrough]];
 
     case kMouseMoveMessage:
       if (hasCapture()) {
@@ -392,14 +412,28 @@ bool Entry::onProcessMessage(Message* msg)
             m_recent_focused = false;
             m_select = m_caret;
           }
-          else if (msg->type() == kMouseDownMessage)
+          // Deselect
+          else if (msg->type() == kMouseDownMessage) {
             m_select = m_caret;
+          }
+          // Continue selecting words
+          else if (!m_selecting_words.isEmpty()) {
+            Range toWord = wordRange(m_caret);
+            if (toWord.from < m_selecting_words.from) {
+              m_select = std::max(m_selecting_words.to, toWord.to);
+              setCaretPos(std::min(m_selecting_words.from, toWord.from));
+            }
+            else {
+              m_select = std::min(m_selecting_words.from, toWord.from);
+              setCaretPos(std::max(m_selecting_words.to, toWord.to));
+            }
+          }
         }
 
         // Show the caret
         if (is_dirty) {
           if (shouldStartTimer(true))
-            m_timer.start();
+            startTimer();
           m_state = true;
         }
 
@@ -410,6 +444,9 @@ bool Entry::onProcessMessage(Message* msg)
     case kMouseUpMessage:
       if (hasCapture()) {
         releaseMouse();
+
+        if (!m_selecting_words.isEmpty())
+          m_selecting_words.reset();
 
         MouseMessage* mouseMsg = static_cast<MouseMessage*>(msg);
         if (mouseMsg->right()) {
@@ -423,10 +460,14 @@ bool Entry::onProcessMessage(Message* msg)
       return true;
 
     case kDoubleClickMessage:
-      forwardWord();
-      m_select = m_caret;
-      backwardWord();
-      invalidate();
+      if (!hasFocus())
+        requestFocus();
+
+      m_selecting_words = wordRange(m_caret);
+      selectText(m_selecting_words.from, m_selecting_words.to);
+
+      // Capture mouse to continue selecting words on kMouseMoveMessage
+      captureMouse();
       return true;
 
     case kMouseEnterMessage:
@@ -441,19 +482,14 @@ bool Entry::onProcessMessage(Message* msg)
 }
 
 // static
-gfx::Size Entry::sizeHintWithText(Entry* entry,
-                                  const std::string& text)
+gfx::Size Entry::sizeHintWithText(Entry* entry, const std::string& text)
 {
-  int w =
-    entry->font()->textLength(text) +
-    + 2*entry->theme()->getEntryCaretSize(entry).w
-    + entry->border().width();
+  int w = entry->font()->textLength(text) + +2 * entry->theme()->getEntryCaretSize(entry).w +
+          entry->border().width();
 
-  w = std::min(w, ui::display_w()/2);
+  w = std::min(w, entry->display()->workareaSizeUIScale().w / 2);
 
-  int h =
-    + entry->font()->height()
-    + entry->border().height();
+  int h = +entry->font()->height() + entry->border().height();
 
   return gfx::Size(w, h);
 }
@@ -461,18 +497,13 @@ gfx::Size Entry::sizeHintWithText(Entry* entry,
 void Entry::onSizeHint(SizeHintEvent& ev)
 {
   int trailing = font()->textLength(getSuffix());
-  trailing = std::max(trailing, 2*theme()->getEntryCaretSize(this).w);
+  trailing = std::max(trailing, 2 * theme()->getEntryCaretSize(this).w);
 
-  int w =
-    font()->textLength("w") * std::min(m_maxsize, 6) +
-    + trailing
-    + border().width();
+  int w = font()->textLength("w") * std::min(m_maxsize, 6) + +trailing + border().width();
 
-  w = std::min(w, ui::display_w()/2);
+  w = std::min(w, display()->workareaSizeUIScale().w / 2);
 
-  int h =
-    + font()->height()
-    + border().height();
+  int h = +font()->height() + border().height();
 
   ev.setSizeHint(w, h);
 }
@@ -501,7 +532,7 @@ gfx::Rect Entry::onGetEntryTextBounds() const
 {
   gfx::Rect bounds = clientBounds();
   bounds.x += border().left();
-  bounds.y += bounds.h/2 - textHeight()/2;
+  bounds.y += CALC_FOR_CENTER(0, bounds.h, textHeight());
   bounds.w -= border().width();
   bounds.h = textHeight();
   return bounds;
@@ -510,19 +541,19 @@ gfx::Rect Entry::onGetEntryTextBounds() const
 int Entry::getCaretFromMouse(MouseMessage* mousemsg)
 {
   int mouseX = mousemsg->position().x;
-  if (mouseX < bounds().x+border().left()) {
+  if (mouseX < bounds().x + border().left()) {
     // Scroll to the left
-    return std::max(0, m_scroll-1);
+    return std::max(0, m_scroll - 1);
   }
 
   int lastPos = lastCaretPos();
   int i = std::min(m_scroll, lastPos);
-  for (; i<lastPos; ++i) {
+  for (; i < lastPos; ++i) {
     int segmentWidth = 0;
     int indexBox = 0;
-    for (int j=m_scroll; j<i; ++j) {
+    for (int j = m_scroll; j < i; ++j) {
       segmentWidth += m_boxes[j].width;
-      indexBox = j+1;
+      indexBox = j + 1;
     }
 
     int x = bounds().x + border().left() + segmentWidth + m_boxes[indexBox].width / 2;
@@ -537,7 +568,7 @@ int Entry::getCaretFromMouse(MouseMessage* mousemsg)
       break;
   }
 
-  return base::clamp(i, 0, lastPos);
+  return std::clamp(i, 0, lastPos);
 }
 
 void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
@@ -546,9 +577,7 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
   const Range range = selectedRange();
 
   switch (cmd) {
-
-    case EntryCmd::NoOp:
-      break;
+    case EntryCmd::NoOp: break;
 
     case EntryCmd::InsertChar:
       // delete the entire selection
@@ -574,8 +603,7 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
         std::wstring unicodeStr;
         unicodeStr.push_back(unicodeChar);
 
-        text.insert(m_boxes[m_caret].from,
-                    base::to_utf8(unicodeStr));
+        text.insert(m_boxes[m_caret].from, base::to_utf8(unicodeStr));
         recalcCharBoxes(text);
         ++m_caret;
       }
@@ -661,8 +689,7 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
       // delete the next character
       else {
         if (m_caret < (int)text.size())
-          text.erase(m_boxes[m_caret].from,
-                     m_boxes[m_caret].to - m_boxes[m_caret].from);
+          text.erase(m_boxes[m_caret].from, m_boxes[m_caret].to - m_boxes[m_caret].from);
       }
 
       m_select = -1;
@@ -686,13 +713,12 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
         // Remove extra chars that do not fit in m_maxsize
         recalcCharBoxes(text);
         if (lastCaretPos() > m_maxsize) {
-          text.erase(m_boxes[m_maxsize].from,
-                     text.size() - m_boxes[m_maxsize].from);
+          text.erase(m_boxes[m_maxsize].from, text.size() - m_boxes[m_maxsize].from);
           recalcCharBoxes(text);
         }
 
         int newBoxes = m_boxes.size();
-        setCaretPos(m_caret+(newBoxes - oldBoxes));
+        setCaretPos(m_caret + (newBoxes - oldBoxes));
       }
       break;
     }
@@ -711,8 +737,7 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
       else {
         if (m_caret > 0) {
           --m_caret;
-          text.erase(m_boxes[m_caret].from,
-                     m_boxes[m_caret].to - m_boxes[m_caret].from);
+          text.erase(m_boxes[m_caret].from, m_boxes[m_caret].to - m_boxes[m_caret].from);
         }
       }
 
@@ -723,19 +748,14 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
       m_select = m_caret;
       backwardWord();
       if (m_caret < m_select) {
-        text.erase(m_boxes[m_caret].from,
-                   m_boxes[m_select-1].to - m_boxes[m_caret].from);
+        text.erase(m_boxes[m_caret].from, m_boxes[m_select - 1].to - m_boxes[m_caret].from);
       }
       m_select = -1;
       break;
 
-    case EntryCmd::DeleteForwardToEndOfLine:
-      text.erase(m_boxes[m_caret].from);
-      break;
+    case EntryCmd::DeleteForwardToEndOfLine: text.erase(m_boxes[m_caret].from); break;
 
-    case EntryCmd::SelectAll:
-      selectAllText();
-      break;
+    case EntryCmd::SelectAll:                selectAllText(); break;
   }
 
   if (text != this->text()) {
@@ -747,43 +767,30 @@ void Entry::executeCmd(EntryCmd cmd, int unicodeChar, bool shift_pressed)
   invalidate();
 }
 
-#define IS_WORD_CHAR(ch)                                \
-  (!((!ch) || (std::isspace(ch)) ||                     \
-    ((ch) == '/') || ((ch) == '\\')))
-
 void Entry::forwardWord()
 {
   int textlen = lastCaretPos();
-  int ch;
 
   for (; m_caret < textlen; ++m_caret) {
-    ch = m_boxes[m_caret].codepoint;
-    if (IS_WORD_CHAR(ch))
+    if (is_word_char(m_boxes[m_caret].codepoint))
       break;
   }
 
   for (; m_caret < textlen; ++m_caret) {
-    ch = m_boxes[m_caret].codepoint;
-    if (!IS_WORD_CHAR(ch)) {
-      ++m_caret;
+    if (!is_word_char(m_boxes[m_caret].codepoint))
       break;
-    }
   }
 }
 
 void Entry::backwardWord()
 {
-  int ch;
-
   for (--m_caret; m_caret >= 0; --m_caret) {
-    ch = m_boxes[m_caret].codepoint;
-    if (IS_WORD_CHAR(ch))
+    if (is_word_char(m_boxes[m_caret].codepoint))
       break;
   }
 
   for (; m_caret >= 0; --m_caret) {
-    ch = m_boxes[m_caret].codepoint;
-    if (!IS_WORD_CHAR(ch)) {
+    if (!is_word_char(m_boxes[m_caret].codepoint)) {
       ++m_caret;
       break;
     }
@@ -793,10 +800,44 @@ void Entry::backwardWord()
     m_caret = 0;
 }
 
+Entry::Range Entry::wordRange(int pos)
+{
+  const int last = lastCaretPos();
+  pos = std::clamp(pos, 0, last);
+
+  int i, j;
+  i = j = pos;
+
+  // Select word space
+  if (is_word_char(m_boxes[pos].codepoint)) {
+    for (; i >= 0; --i) {
+      if (!is_word_char(m_boxes[i].codepoint))
+        break;
+    }
+    ++i;
+    for (; j <= last; ++j) {
+      if (!is_word_char(m_boxes[j].codepoint))
+        break;
+    }
+  }
+  // Select punctuation space
+  else {
+    for (; i >= 0; --i) {
+      if (is_word_char(m_boxes[i].codepoint))
+        break;
+    }
+    ++i;
+    for (; j <= last; ++j) {
+      if (is_word_char(m_boxes[j].codepoint))
+        break;
+    }
+  }
+  return Range(i, j);
+}
+
 bool Entry::isPosInSelection(int pos)
 {
-  return (pos >= std::min(m_caret, m_select) &&
-          pos <= std::max(m_caret, m_select));
+  return (pos >= std::min(m_caret, m_select) && pos <= std::max(m_caret, m_select));
 }
 
 void Entry::showEditPopupMenu(const gfx::Point& pt)
@@ -808,22 +849,21 @@ void Entry::showEditPopupMenu(const gfx::Point& pt)
   menu.addChild(&cut);
   menu.addChild(&copy);
   menu.addChild(&paste);
-  cut.Click.connect([this]{ executeCmd(EntryCmd::Cut, 0, false); });
-  copy.Click.connect([this]{ executeCmd(EntryCmd::Copy, 0, false); });
-  paste.Click.connect([this]{ executeCmd(EntryCmd::Paste, 0, false); });
+  cut.Click.connect([this] { executeCmd(EntryCmd::Cut, 0, false); });
+  copy.Click.connect([this] { executeCmd(EntryCmd::Copy, 0, false); });
+  paste.Click.connect([this] { executeCmd(EntryCmd::Paste, 0, false); });
 
   if (isReadOnly()) {
     cut.setEnabled(false);
     paste.setEnabled(false);
   }
 
-  menu.showPopup(pt);
+  menu.showPopup(pt, display());
 }
 
 class Entry::CalcBoxesTextDelegate : public os::DrawTextDelegate {
 public:
-  CalcBoxesTextDelegate(const int end) : m_end(end) {
-  }
+  CalcBoxesTextDelegate(const int end) : m_end(end) {}
 
   const Entry::CharBoxes& boxes() const { return m_boxes; }
 
@@ -831,7 +871,8 @@ public:
                       const int codepoint,
                       gfx::Color& fg,
                       gfx::Color& bg,
-                      const gfx::Rect& charBounds) override {
+                      const gfx::Rect& charBounds) override
+  {
     if (!m_boxes.empty())
       m_boxes.back().to = index;
 
@@ -841,14 +882,13 @@ public:
     m_box.to = m_end;
   }
 
-  bool preDrawChar(const gfx::Rect& charBounds) override {
+  bool preDrawChar(const gfx::Rect& charBounds) override
+  {
     m_box.width = charBounds.w;
     return true;
   }
 
-  void postDrawChar(const gfx::Rect& charBounds) override {
-    m_boxes.push_back(m_box);
-  }
+  void postDrawChar(const gfx::Rect& charBounds) override { m_boxes.push_back(m_box); }
 
 private:
   Entry::CharBox m_box;
@@ -860,10 +900,7 @@ void Entry::recalcCharBoxes(const std::string& text)
 {
   int lastTextIndex = int(text.size());
   CalcBoxesTextDelegate delegate(lastTextIndex);
-  os::draw_text(nullptr, font(),
-                 base::utf8_const_iterator(text.begin()),
-                 base::utf8_const_iterator(text.end()),
-                 gfx::ColorNone, gfx::ColorNone, 0, 0, &delegate);
+  os::draw_text(nullptr, font(), text, gfx::ColorNone, gfx::ColorNone, 0, 0, &delegate);
   m_boxes = delegate.boxes();
 
   if (!m_boxes.empty()) {
@@ -884,9 +921,24 @@ bool Entry::shouldStartTimer(bool hasFocus)
 
 void Entry::deleteRange(const Range& range, std::string& text)
 {
-  text.erase(m_boxes[range.from].from,
-             m_boxes[range.to-1].to - m_boxes[range.from].from);
+  text.erase(m_boxes[range.from].from, m_boxes[range.to - 1].to - m_boxes[range.from].from);
   m_caret = range.from;
+}
+
+void Entry::startTimer()
+{
+  if (s_timer)
+    s_timer->stop();
+  s_timer = std::make_unique<Timer>(500, this);
+  s_timer->start();
+}
+
+void Entry::stopTimer()
+{
+  if (s_timer) {
+    s_timer->stop();
+    s_timer.reset();
+  }
 }
 
 } // namespace ui

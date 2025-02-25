@@ -1,11 +1,11 @@
 // Aseprite Document Library
-// Copyright (c) 2019 Igara Studio S.A.
+// Copyright (c) 2019-2022 Igara Studio S.A.
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "render/render.h"
@@ -47,9 +47,9 @@ static void Bm_Render(benchmark::State& state)
   clear_image(img1, 0);
   clear_image(img2.get(), 0);
   clear_image(img3.get(), 0);
-  fill_rect(img1, 32, 32, w-64, h-64, rgba(32, 128, 255, 128));
-  fill_rect(img2.get(), 0, 0, w-64, h-64, rgba(255, 100, 32, 128));
-  fill_rect(img3.get(), 64, 64, w-64, h-64, rgba(200, 64, 80, 128));
+  fill_rect(img1, 32, 32, w - 64, h - 64, rgba(32, 128, 255, 128));
+  fill_rect(img2.get(), 0, 0, w - 64, h - 64, rgba(255, 100, 32, 128));
+  fill_rect(img3.get(), 64, 64, w - 64, h - 64, rgba(200, 64, 80, 128));
 
   std::unique_ptr<Image> dst(Image::create(spr->pixelFormat(), w, h));
   clear_image(dst.get(), 0);
@@ -58,14 +58,14 @@ static void Bm_Render(benchmark::State& state)
     clear_image(dst.get(), 0);
 
     Render render;
-    render.setBgType(BgType::CHECKED);
-    render.setBgZoom(true);
-    render.setBgColor1(rgba(100, 100, 100, 255));
-    render.setBgColor2(rgba(200, 200, 200, 255));
-    render.setBgCheckedSize(gfx::Size(16, 16));
-    render.renderSprite(
-      dst.get(), spr, frame_t(0),
-      gfx::Clip(0, 0, 0, 0, w, h));
+    BgOptions bg;
+    bg.type = BgType::CHECKERED;
+    bg.zoom = true;
+    bg.color1 = rgba(100, 100, 100, 255);
+    bg.color2 = rgba(200, 200, 200, 255);
+    bg.stripeSize = gfx::Size(16, 16);
+    render.setBgOptions(bg);
+    render.renderSprite(dst.get(), spr, frame_t(0), gfx::Clip(0, 0, 0, 0, w, h));
   }
 }
 

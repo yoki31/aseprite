@@ -5,13 +5,14 @@
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
 #include "app/cmd/unlink_cel.h"
 #include "app/commands/command.h"
 #include "app/context_access.h"
+#include "app/i18n/strings.h"
 #include "app/modules/gui.h"
 #include "app/tx.h"
 #include "app/ui/status_bar.h"
@@ -30,8 +31,7 @@ protected:
   void onExecute(Context* context) override;
 };
 
-UnlinkCelCommand::UnlinkCelCommand()
-  : Command(CommandId::UnlinkCel(), CmdRecordableFlag)
+UnlinkCelCommand::UnlinkCelCommand() : Command(CommandId::UnlinkCel(), CmdRecordableFlag)
 {
 }
 
@@ -46,11 +46,10 @@ void UnlinkCelCommand::onExecute(Context* context)
   Doc* document(writer.document());
   bool nonEditableLayers = false;
   {
-    Tx tx(writer.context(), "Unlink Cel");
+    Tx tx(writer, "Unlink Cel");
 
     const Site* site = writer.site();
-    if (site->inTimeline() &&
-        !site->selectedLayers().empty()) {
+    if (site->inTimeline() && !site->selectedLayers().empty()) {
       for (Layer* layer : site->selectedLayers()) {
         if (!layer->isImage())
           continue;
@@ -83,8 +82,7 @@ void UnlinkCelCommand::onExecute(Context* context)
   }
 
   if (nonEditableLayers)
-    StatusBar::instance()->showTip(1000,
-      "There are locked layers");
+    StatusBar::instance()->showTip(1000, Strings::statusbar_tips_locked_layers());
 
   update_screen_for_document(document);
 }

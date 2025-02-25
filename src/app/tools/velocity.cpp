@@ -1,19 +1,18 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/tools/velocity.h"
 
-#include "base/clamp.h"
+#include <algorithm>
 
-namespace app {
-namespace tools {
+namespace app { namespace tools {
 
 VelocitySensor::VelocitySensor()
 {
@@ -27,7 +26,7 @@ void VelocitySensor::reset()
   m_velocity = Vec2(0.0f, 0.0f);
 }
 
-void VelocitySensor::updateWithScreenPoint(const gfx::Point& screenPoint)
+void VelocitySensor::updateWithDisplayPoint(const gfx::Point& screenPoint)
 {
   const base::tick_t t = base::current_tick();
   const base::tick_t dt = t - m_lastUpdate;
@@ -39,14 +38,13 @@ void VelocitySensor::updateWithScreenPoint(const gfx::Point& screenPoint)
   else {
     gfx::PointF newVelocity(screenPoint - m_lastPoint);
 
-    const float a = base::clamp(float(dt) / kFullUpdateMSecs, 0.0f, 1.0f);
-    m_velocity.x = (1.0f-a)*m_velocity.x + a*newVelocity.x;
-    m_velocity.y = (1.0f-a)*m_velocity.y + a*newVelocity.y;
+    const float a = std::clamp(float(dt) / kFullUpdateMSecs, 0.0f, 1.0f);
+    m_velocity.x = (1.0f - a) * m_velocity.x + a * newVelocity.x;
+    m_velocity.y = (1.0f - a) * m_velocity.y + a * newVelocity.y;
   }
 
   m_lastPoint.x = screenPoint.x;
   m_lastPoint.y = screenPoint.y;
 }
 
-} // namespace tools
-} // namespace app
+}} // namespace app::tools

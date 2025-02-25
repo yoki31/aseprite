@@ -1,18 +1,17 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/editor/editor_view.h"
 
 #include "app/app.h"
-#include "app/modules/editors.h"
 #include "app/modules/gui.h"
 #include "app/pref/preferences.h"
 #include "app/ui/editor/editor.h"
@@ -36,28 +35,23 @@ void EditorView::SetScrollUpdateMethod(Method method)
   g_scrollUpdateMethod = method;
 }
 
-EditorView::EditorView(EditorView::Type type)
-  : View()
-  , m_type(type)
+EditorView::EditorView(EditorView::Type type) : View(), m_type(type)
 {
-  m_scrollSettingsConn =
-    Preferences::instance().editor.showScrollbars.AfterChange.connect(
-      [this]{ setupScrollbars(); });
+  m_scrollSettingsConn = Preferences::instance().editor.showScrollbars.AfterChange.connect(
+    [this] { setupScrollbars(); });
 
-  InitTheme.connect(
-    [this]{
-      SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
-      setBgColor(gfx::rgba(0, 0, 0)); // TODO Move this color to theme.xml
-      setStyle(theme->styles.editorView());
-      setupScrollbars();
-    });
+  InitTheme.connect([this] {
+    auto theme = SkinTheme::get(this);
+    setBgColor(gfx::rgba(0, 0, 0)); // TODO Move this color to theme.xml
+    setStyle(theme->styles.editorView());
+    setupScrollbars();
+  });
   initTheme();
 }
 
 void EditorView::onPaint(PaintEvent& ev)
 {
   switch (m_type) {
-
     // Only show the view selected if it is the current editor
     case CurrentEditorMode:
       if (editor()->isActive())
@@ -67,10 +61,7 @@ void EditorView::onPaint(PaintEvent& ev)
       break;
 
       // Always show selected
-    case AlwaysSelected:
-      enableFlags(SELECTED);
-      break;
-
+    case AlwaysSelected: enableFlags(SELECTED); break;
   }
 
   View::onPaint(ev);
@@ -82,12 +73,8 @@ void EditorView::onResize(ResizeEvent& ev)
   gfx::Point oldPos;
   if (editor) {
     switch (g_scrollUpdateMethod) {
-      case KeepOrigin:
-        oldPos = editor->editorToScreen(gfx::Point(0, 0));
-        break;
-      case KeepCenter:
-        oldPos = editor->screenToEditor(viewportBounds().center());
-        break;
+      case KeepOrigin: oldPos = editor->editorToScreen(gfx::Point(0, 0)); break;
+      case KeepCenter: oldPos = editor->screenToEditor(viewportBounds().center()); break;
     }
   }
 
@@ -102,9 +89,7 @@ void EditorView::onResize(ResizeEvent& ev)
         editor->setEditorScroll(oldScroll + newPos - oldPos);
         break;
       }
-      case KeepCenter:
-        editor->centerInSpritePoint(oldPos);
-        break;
+      case KeepCenter: editor->centerInSpritePoint(oldPos); break;
     }
   }
 }
@@ -143,12 +128,11 @@ void EditorView::onScrollChange()
 
 void EditorView::setupScrollbars()
 {
-  if (m_type == AlwaysSelected ||
-      !Preferences::instance().editor.showScrollbars()) {
+  if (m_type == AlwaysSelected || !Preferences::instance().editor.showScrollbars()) {
     hideScrollBars();
   }
   else {
-    SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+    auto theme = SkinTheme::get(this);
     int barsize = theme->dimensions.miniScrollbarSize();
 
     horizontalBar()->setBarWidth(barsize);

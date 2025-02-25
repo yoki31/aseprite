@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2022  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/res/http_loader.h"
@@ -28,7 +28,7 @@ HttpLoader::HttpLoader(const std::string& url)
   : m_url(url)
   , m_done(false)
   , m_request(nullptr)
-  , m_thread([this]{ threadHttpRequest(); })
+  , m_thread([this] { threadHttpRequest(); })
 {
 }
 
@@ -46,7 +46,7 @@ void HttpLoader::abort()
 void HttpLoader::threadHttpRequest()
 {
   try {
-    base::ScopedValue<bool> scoped(m_done, false, true);
+    base::ScopedValue<std::atomic<bool>, bool> scoped(m_done, false, true);
 
     LOG("HTTP: Sending http request to %s\n", m_url.c_str());
 
@@ -63,8 +63,7 @@ void HttpLoader::threadHttpRequest()
     std::ofstream output(FSTREAM_PATH(fn), std::ofstream::binary);
     m_request = new net::HttpRequest(m_url);
     net::HttpResponse response(&output);
-    if (m_request->send(response) &&
-        response.status() == 200) {
+    if (m_request->send(response) && response.status() == 200) {
       m_filename = fn;
     }
 

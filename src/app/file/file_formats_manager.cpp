@@ -1,11 +1,12 @@
 // Aseprite
+// Copyright (C) 2021-2023  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/file/file_formats_manager.h"
@@ -29,10 +30,15 @@ extern FileFormat* CreateIcoFormat();
 extern FileFormat* CreateJpegFormat();
 extern FileFormat* CreatePcxFormat();
 extern FileFormat* CreatePngFormat();
+extern FileFormat* CreateQoiFormat();
 extern FileFormat* CreateSvgFormat();
 extern FileFormat* CreateTgaFormat();
 
-#ifdef ASEPRITE_WITH_WEBP_SUPPORT
+#ifdef ENABLE_PSD
+extern FileFormat* CreatePsdFormat();
+#endif
+
+#ifdef ENABLE_WEBP
 extern FileFormat* CreateWebPFormat();
 #endif
 
@@ -65,10 +71,16 @@ FileFormatsManager::FileFormatsManager()
   registerFormat(CreateJpegFormat());
   registerFormat(CreatePcxFormat());
   registerFormat(CreatePngFormat());
+
+#ifdef ENABLE_PSD
+  registerFormat(CreatePsdFormat());
+#endif
+
+  registerFormat(CreateQoiFormat());
   registerFormat(CreateSvgFormat());
   registerFormat(CreateTgaFormat());
 
-#ifdef ASEPRITE_WITH_WEBP_SUPPORT
+#ifdef ENABLE_WEBP
   registerFormat(CreateWebPFormat());
 #endif
 }
@@ -77,7 +89,7 @@ FileFormatsManager::~FileFormatsManager()
 {
   FileFormatsList::iterator end = this->end();
   for (FileFormatsList::iterator it = begin(); it != end; ++it) {
-    delete (*it);               // delete the FileFormat
+    delete (*it); // delete the FileFormat
   }
 }
 

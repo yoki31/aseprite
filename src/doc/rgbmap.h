@@ -1,5 +1,5 @@
 // Aseprite Document Library
-// Copyright (c) 2001-2016 David Capello
+// Copyright (c) 2020-2024 Igara Studio S.A.
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
@@ -9,49 +9,47 @@
 #pragma once
 
 #include "base/debug.h"
-#include "base/disable_copying.h"
-#include "doc/object.h"
-
-#include <vector>
+#include "doc/color.h"
+#include "doc/fit_criteria.h"
+#include "doc/rgbmap_algorithm.h"
 
 namespace doc {
 
-  class Palette;
+class Palette;
 
-  // It acts like a cache for Palette:findBestfit() calls.
-  class RgbMap : public Object {
-    // Bit activated on m_map entries that aren't yet calculated.
-    const int INVALID = 256;
+// Matches a RGBA value with an index in a color palette (doc::Palette).
+class RgbMap {
+public:
+  virtual ~RgbMap() {}
 
-  public:
-    RgbMap();
+  virtual void regenerateMap(const Palette* palette,
+                             const int maskIndex,
+                             const FitCriteria fitCriteria) = 0;
 
-    bool match(const Palette* palette) const;
-    void regenerate(const Palette* palette, int mask_index);
+  virtual void regenerateMap(const Palette* palette, const int maskIndex) = 0;
 
-    int mapColor(int r, int g, int b, int a) const {
-      ASSERT(r >= 0 && r < 256);
-      ASSERT(g >= 0 && g < 256);
-      ASSERT(b >= 0 && b < 256);
-      ASSERT(a >= 0 && a < 256);
-      // bits -> bbbbbgggggrrrrraaa
-      int i = (a>>5) | ((b>>3) << 3) | ((g>>3) << 8) | ((r>>3) << 13);
-      int v = m_map[i];
-      return (v & INVALID) ? generateEntry(i, r, g, b, a): v;
-    }
+  // Should return the best index in a palette that matches the given RGBA values.
+  virtual int mapColor(const color_t rgba) const = 0;
 
-    int maskIndex() const { return m_maskIndex; }
+  virtual int maskIndex() const = 0;
 
-  private:
-    int generateEntry(int i, int r, int g, int b, int a) const;
+  virtual RgbMapAlgorithm rgbmapAlgorithm() const = 0;
 
-    mutable std::vector<uint16_t> m_map;
-    const Palette* m_palette;
-    int m_modifications;
-    int m_maskIndex;
+  virtual int modifications() const = 0;
 
-    DISABLE_COPYING(RgbMap);
-  };
+  // Color Best Fit Criteria used to generate the rgbmap
+  virtual FitCriteria fitCriteria() const = 0;
+  virtual void fitCriteria(const FitCriteria fitCriteria) = 0;
+
+  int mapColor(const int r, const int g, const int b, const int a) const
+  {
+    ASSERT(r >= 0 && r < 256);
+    ASSERT(g >= 0 && g < 256);
+    ASSERT(b >= 0 && b < 256);
+    ASSERT(a >= 0 && a < 256);
+    return mapColor(rgba(r, g, b, a));
+  }
+};
 
 } // namespace doc
 

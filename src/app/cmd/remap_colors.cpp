@@ -5,7 +5,7 @@
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/cmd/remap_colors.h"
@@ -15,15 +15,13 @@
 #include "doc/image.h"
 #include "doc/remap.h"
 #include "doc/sprite.h"
+#include "doc/tilesets.h"
 
-namespace app {
-namespace cmd {
+namespace app { namespace cmd {
 
 using namespace doc;
 
-RemapColors::RemapColors(Sprite* sprite, const Remap& remap)
-  : WithSprite(sprite)
-  , m_remap(remap)
+RemapColors::RemapColors(Sprite* sprite, const Remap& remap) : WithSprite(sprite), m_remap(remap)
 {
 }
 
@@ -31,7 +29,7 @@ void RemapColors::onExecute()
 {
   Sprite* spr = sprite();
   if (spr->pixelFormat() == IMAGE_INDEXED) {
-    spr->remapImages(0, spr->lastFrame(), m_remap);
+    spr->remapImages(m_remap);
     incrementVersions(spr);
   }
 }
@@ -40,7 +38,7 @@ void RemapColors::onUndo()
 {
   Sprite* spr = this->sprite();
   if (spr->pixelFormat() == IMAGE_INDEXED) {
-    spr->remapImages(0, spr->lastFrame(), m_remap.invert());
+    spr->remapImages(m_remap.invert());
     incrementVersions(spr);
   }
 }
@@ -49,7 +47,14 @@ void RemapColors::incrementVersions(Sprite* spr)
 {
   for (const Cel* cel : spr->uniqueCels())
     cel->image()->incrementVersion();
+
+  if (spr->hasTilesets()) {
+    for (Tileset* tileset : *spr->tilesets()) {
+      if (!tileset)
+        continue;
+      tileset->incrementVersion();
+    }
+  }
 }
 
-} // namespace cmd
-} // namespace app
+}} // namespace app::cmd

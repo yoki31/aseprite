@@ -1,31 +1,29 @@
 // Aseprite
-// Copyright (C) 2018  Igara Studio S.A.
+// Copyright (C) 2018-2021  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/script/docobj.h"
+#include "app/script/engine.h"
 #include "app/script/luacpp.h"
-#include "doc/image.h"
+#include "doc/cel.h"
 #include "doc/object_ids.h"
 
-namespace app {
-namespace script {
+namespace app { namespace script {
 
 using namespace doc;
 
 namespace {
 
 struct ImagesObj {
-  ObjectIds images;
+  ObjectIds cels;
 
-  ImagesObj(const ObjectIds& images)
-    : images(images) {
-  }
+  ImagesObj(const ObjectIds& cels) : cels(cels) {}
 
   ImagesObj(const ImagesObj&) = delete;
   ImagesObj& operator=(const ImagesObj&) = delete;
@@ -40,7 +38,7 @@ int Images_gc(lua_State* L)
 int Images_len(lua_State* L)
 {
   auto obj = get_obj<ImagesObj>(L, 1);
-  lua_pushinteger(L, obj->images.size());
+  lua_pushinteger(L, obj->cels.size());
   return 1;
 }
 
@@ -48,18 +46,21 @@ int Images_index(lua_State* L)
 {
   auto obj = get_obj<ImagesObj>(L, 1);
   const int i = lua_tointeger(L, 2);
-  if (i >= 1 && i <= obj->images.size())
-    push_docobj<Image>(L, obj->images[i-1]);
-  else
-    lua_pushnil(L);
+  if (i >= 1 && i <= obj->cels.size()) {
+    if (auto cel = doc::get<doc::Cel>(obj->cels[i - 1])) {
+      push_cel_image(L, cel);
+      return 1;
+    }
+  }
+  lua_pushnil(L);
   return 1;
 }
 
 const luaL_Reg Images_methods[] = {
-  { "__gc", Images_gc },
-  { "__len", Images_len },
+  { "__gc",    Images_gc    },
+  { "__len",   Images_len   },
   { "__index", Images_index },
-  { nullptr, nullptr }
+  { nullptr,   nullptr      }
 };
 
 } // anonymous namespace
@@ -72,10 +73,9 @@ void register_images_class(lua_State* L)
   REG_CLASS(L, Images);
 }
 
-void push_images(lua_State* L, const ObjectIds& images)
+void push_cel_images(lua_State* L, const ObjectIds& cels)
 {
-  push_new<ImagesObj>(L, images);
+  push_new<ImagesObj>(L, cels);
 }
 
-} // namespace script
-} // namespace app
+}} // namespace app::script

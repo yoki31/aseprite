@@ -1,4 +1,5 @@
 // Aseprite Document IO Library
+// Copyright (c) 2021-2023 Igara Studio S.A.
 // Copyright (c) 2016-2017 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -14,8 +15,8 @@ enum class FileFormat {
   ERROR = -1,
   UNKNOWN = 0,
 
-  ASE_ANIMATION,                // Aseprite File Format
-  ASE_PALETTE,                  // Adobe Swatch Exchange
+  ASE_ANIMATION, // Aseprite File Format
+  ASE_PALETTE,   // Adobe Swatch Exchange
   ACT_PALETTE,
   BMP_IMAGE,
   COL_PALETTE,
@@ -32,6 +33,8 @@ enum class FileFormat {
   TARGA_IMAGE,
   WEBP_ANIMATION,
   CSS_STYLE,
+  PSD_IMAGE,
+  QOI_IMAGE,
 };
 
 } // namespace dio

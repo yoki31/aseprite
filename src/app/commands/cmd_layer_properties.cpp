@@ -1,38 +1,49 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
 #include "app/cmd/set_layer_blend_mode.h"
 #include "app/cmd/set_layer_name.h"
 #include "app/cmd/set_layer_opacity.h"
+#include "app/cmd/set_layer_tileset.h"
+#include "app/cmd/set_tileset_base_index.h"
+#include "app/cmd/set_tileset_match_flags.h"
+#include "app/cmd/set_tileset_name.h"
 #include "app/cmd/set_user_data.h"
 #include "app/commands/command.h"
 #include "app/console.h"
 #include "app/context_access.h"
 #include "app/doc.h"
 #include "app/doc_event.h"
+#include "app/i18n/strings.h"
 #include "app/modules/gui.h"
 #include "app/tx.h"
+#include "app/ui/main_window.h"
 #include "app/ui/separator_in_view.h"
+#include "app/ui/tileset_selector.h"
 #include "app/ui/timeline/timeline.h"
-#include "app/ui/user_data_popup.h"
+#include "app/ui/user_data_view.h"
 #include "app/ui_context.h"
 #include "base/scoped_value.h"
 #include "doc/image.h"
 #include "doc/layer.h"
+#include "doc/layer_tilemap.h"
 #include "doc/sprite.h"
+#include "doc/tileset.h"
+#include "doc/tilesets.h"
 #include "doc/user_data.h"
 #include "ui/ui.h"
 
 #include "layer_properties.xml.h"
+#include "tileset_selector_window.xml.h"
 
 namespace app {
 
@@ -56,54 +67,70 @@ class LayerPropertiesWindow : public app::gen::LayerProperties,
 public:
   class BlendModeItem : public ListItem {
   public:
-    BlendModeItem(const std::string& name,
-                  const doc::BlendMode mode)
-      : ListItem(name)
-      , m_mode(mode) {
+    BlendModeItem(const std::string& name, const doc::BlendMode mode) : ListItem(name), m_mode(mode)
+    {
     }
     doc::BlendMode mode() const { return m_mode; }
+
   private:
     doc::BlendMode m_mode;
   };
 
   LayerPropertiesWindow()
     : m_timer(250, this)
-    , m_document(nullptr)
-    , m_layer(nullptr)
-    , m_selfUpdate(false) {
+    , m_userDataView(Preferences::instance().layers.userDataVisibility)
+  {
     name()->setMinSize(gfx::Size(128, 0));
     name()->setExpansive(true);
 
-    mode()->addItem(new BlendModeItem("Normal", doc::BlendMode::NORMAL));
+    mode()->addItem(new BlendModeItem(Strings::layer_properties_normal(), doc::BlendMode::NORMAL));
     mode()->addItem(new SeparatorInView);
-    mode()->addItem(new BlendModeItem("Darken", doc::BlendMode::DARKEN));
-    mode()->addItem(new BlendModeItem("Multiply", doc::BlendMode::MULTIPLY));
-    mode()->addItem(new BlendModeItem("Color Burn", doc::BlendMode::COLOR_BURN));
+    mode()->addItem(new BlendModeItem(Strings::layer_properties_darken(), doc::BlendMode::DARKEN));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_multiply(), doc::BlendMode::MULTIPLY));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_color_burn(), doc::BlendMode::COLOR_BURN));
     mode()->addItem(new SeparatorInView);
-    mode()->addItem(new BlendModeItem("Lighten", doc::BlendMode::LIGHTEN));
-    mode()->addItem(new BlendModeItem("Screen", doc::BlendMode::SCREEN));
-    mode()->addItem(new BlendModeItem("Color Dodge", doc::BlendMode::COLOR_DODGE));
-    mode()->addItem(new BlendModeItem("Addition", doc::BlendMode::ADDITION));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_lighten(), doc::BlendMode::LIGHTEN));
+    mode()->addItem(new BlendModeItem(Strings::layer_properties_screen(), doc::BlendMode::SCREEN));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_color_dodge(), doc::BlendMode::COLOR_DODGE));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_addition(), doc::BlendMode::ADDITION));
     mode()->addItem(new SeparatorInView);
-    mode()->addItem(new BlendModeItem("Overlay", doc::BlendMode::OVERLAY));
-    mode()->addItem(new BlendModeItem("Soft Light", doc::BlendMode::SOFT_LIGHT));
-    mode()->addItem(new BlendModeItem("Hard Light", doc::BlendMode::HARD_LIGHT));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_overlay(), doc::BlendMode::OVERLAY));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_soft_light(), doc::BlendMode::SOFT_LIGHT));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_hard_light(), doc::BlendMode::HARD_LIGHT));
     mode()->addItem(new SeparatorInView);
-    mode()->addItem(new BlendModeItem("Difference", doc::BlendMode::DIFFERENCE));
-    mode()->addItem(new BlendModeItem("Exclusion", doc::BlendMode::EXCLUSION));
-    mode()->addItem(new BlendModeItem("Subtract", doc::BlendMode::SUBTRACT));
-    mode()->addItem(new BlendModeItem("Divide", doc::BlendMode::DIVIDE));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_difference(), doc::BlendMode::DIFFERENCE));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_exclusion(), doc::BlendMode::EXCLUSION));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_subtract(), doc::BlendMode::SUBTRACT));
+    mode()->addItem(new BlendModeItem(Strings::layer_properties_divide(), doc::BlendMode::DIVIDE));
     mode()->addItem(new SeparatorInView);
-    mode()->addItem(new BlendModeItem("Hue", doc::BlendMode::HSL_HUE));
-    mode()->addItem(new BlendModeItem("Saturation", doc::BlendMode::HSL_SATURATION));
-    mode()->addItem(new BlendModeItem("Color", doc::BlendMode::HSL_COLOR));
-    mode()->addItem(new BlendModeItem("Luminosity", doc::BlendMode::HSL_LUMINOSITY));
+    mode()->addItem(new BlendModeItem(Strings::layer_properties_hue(), doc::BlendMode::HSL_HUE));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_saturation(), doc::BlendMode::HSL_SATURATION));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_color(), doc::BlendMode::HSL_COLOR));
+    mode()->addItem(
+      new BlendModeItem(Strings::layer_properties_luminosity(), doc::BlendMode::HSL_LUMINOSITY));
 
-    name()->Change.connect([this]{ onStartTimer(); });
-    mode()->Change.connect([this]{ onStartTimer(); });
-    opacity()->Change.connect([this]{ onStartTimer(); });
-    m_timer.Tick.connect([this]{ onCommitChange(); });
-    userData()->Click.connect([this]{ onPopupUserData(); });
+    name()->Change.connect([this] { onStartTimer(); });
+    mode()->Change.connect([this] { onStartTimer(); });
+    opacity()->Change.connect([this] { onStartTimer(); });
+    m_timer.Tick.connect([this] { onCommitChange(); });
+    userData()->Click.connect([this] { onToggleUserData(); });
+    tileset()->Click.connect([this] { onTileset(); });
+    tileset()->setVisible(false);
+
+    m_userDataView.UserDataChange.connect([this] { onStartTimer(); });
 
     remapWindow();
     centerWindow();
@@ -112,11 +139,10 @@ public:
     UIContext::instance()->add_observer(this);
   }
 
-  ~LayerPropertiesWindow() {
-    UIContext::instance()->remove_observer(this);
-  }
+  ~LayerPropertiesWindow() { UIContext::instance()->remove_observer(this); }
 
-  void setLayer(Doc* doc, Layer* layer) {
+  void setLayer(Doc* doc, Layer* layer)
+  {
     if (m_layer) {
       m_document->remove_observer(this);
       m_layer = nullptr;
@@ -130,16 +156,18 @@ public:
     if (m_document)
       m_document->add_observer(this);
 
+    if (countLayers() > 0) {
+      m_userDataView.configureAndSet(m_layer->userData(), g_window->propertiesGrid());
+    }
+
     updateFromLayer();
   }
 
 private:
+  std::string nameValue() const { return name()->text(); }
 
-  std::string nameValue() const {
-    return name()->text();
-  }
-
-  BlendMode blendModeValue() const {
+  doc::BlendMode blendModeValue() const
+  {
     BlendModeItem* item = dynamic_cast<BlendModeItem*>(mode()->getSelectedItem());
     if (item)
       return item->mode();
@@ -147,11 +175,10 @@ private:
       return doc::BlendMode::NORMAL;
   }
 
-  int opacityValue() const {
-    return opacity()->getValue();
-  }
+  int opacityValue() const { return opacity()->getValue(); }
 
-  int countLayers() const {
+  int countLayers() const
+  {
     if (!m_document)
       return 0;
     else if (m_layer && !m_range.enabled())
@@ -162,16 +189,13 @@ private:
       return 0;
   }
 
-  bool onProcessMessage(ui::Message* msg) override {
+  bool onProcessMessage(ui::Message* msg) override
+  {
     switch (msg->type()) {
-
       case kKeyDownMessage:
-        if (name()->hasFocus() ||
-            opacity()->hasFocus() ||
-            mode()->hasFocus()) {
+        if (name()->hasFocus() || opacity()->hasFocus() || mode()->hasFocus()) {
           KeyScancode scancode = static_cast<KeyMessage*>(msg)->scancode();
-          if (scancode == kKeyEnter ||
-              scancode == kKeyEsc) {
+          if (scancode == kKeyEnter || scancode == kKeyEsc) {
             onCommitChange();
             closeWindow(this);
             return true;
@@ -187,24 +211,30 @@ private:
         deferDelete();
         g_window = nullptr;
         break;
-
     }
     return Window::onProcessMessage(msg);
   }
 
-  void onStartTimer() {
+  void onStartTimer()
+  {
     if (m_selfUpdate)
       return;
 
     m_timer.start();
+    m_pendingChanges = true;
   }
 
-  void onCommitChange() {
+  void onCommitChange()
+  {
+    // Nothing to change
+    if (!m_pendingChanges)
+      return;
+
     // Nothing to do here, as there is no layer selected.
     if (!m_layer)
       return;
 
-    base::ScopedValue<bool> switchSelf(m_selfUpdate, true, false);
+    base::ScopedValue switchSelf(m_selfUpdate, true);
 
     m_timer.stop();
 
@@ -212,17 +242,17 @@ private:
 
     std::string newName = nameValue();
     int newOpacity = opacityValue();
-    BlendMode newBlendMode = blendModeValue();
+    const doc::UserData newUserData = m_userDataView.userData();
+    doc::BlendMode newBlendMode = blendModeValue();
 
-    if ((count > 1) ||
-        (count == 1 && m_layer && (newName != m_layer->name() ||
-                                   m_userData != m_layer->userData() ||
-                                   (m_layer->isImage() &&
-                                    (newOpacity != static_cast<LayerImage*>(m_layer)->opacity() ||
-                                     newBlendMode != static_cast<LayerImage*>(m_layer)->blendMode()))))) {
+    if ((count > 1) || (count == 1 && m_layer &&
+                        (newName != m_layer->name() || newUserData != m_layer->userData() ||
+                         (m_layer->isImage() &&
+                          (newOpacity != static_cast<LayerImage*>(m_layer)->opacity() ||
+                           newBlendMode != static_cast<LayerImage*>(m_layer)->blendMode()))))) {
       try {
         ContextWriter writer(UIContext::instance());
-        Tx tx(writer.context(), "Set Layer Properties");
+        Tx tx(writer, "Set Layer Properties");
 
         DocRange range;
         if (m_range.enabled())
@@ -233,16 +263,18 @@ private:
         }
 
         const bool nameChanged = (newName != m_layer->name());
-        const bool userDataChanged = (m_userData != m_layer->userData());
-        const bool opacityChanged = (m_layer->isImage() && newOpacity != static_cast<LayerImage*>(m_layer)->opacity());
-        const bool blendModeChanged = (m_layer->isImage() && newBlendMode != static_cast<LayerImage*>(m_layer)->blendMode());
+        const bool userDataChanged = (newUserData != m_layer->userData());
+        const bool opacityChanged = (m_layer->isImage() &&
+                                     newOpacity != static_cast<LayerImage*>(m_layer)->opacity());
+        const bool blendModeChanged =
+          (m_layer->isImage() && newBlendMode != static_cast<LayerImage*>(m_layer)->blendMode());
 
         for (Layer* layer : range.selectedLayers()) {
           if (nameChanged && newName != layer->name())
             tx(new cmd::SetLayerName(layer, newName));
 
-          if (userDataChanged && m_userData != layer->userData())
-            tx(new cmd::SetUserData(layer, m_userData));
+          if (userDataChanged && newUserData != layer->userData())
+            tx(new cmd::SetUserData(layer, newUserData, m_document));
 
           if (layer->isImage()) {
             if (opacityChanged && newOpacity != static_cast<LayerImage*>(layer)->opacity())
@@ -265,50 +297,130 @@ private:
 
       update_screen_for_document(m_document);
     }
+
+    // We indicate that there are no more pending changes in both
+    // cases 1) if we were able to commit the transaction or 2) if an
+    // exception ocurred (e.g. the sprite was locked). This is because
+    // sometimes if a big operation with multiple modifications
+    // (e.g. deleting a lot of cels at the same time) is going to
+    // happen, we'll receive a lot of onActiveSiteChange() events +
+    // onCommitChange() calls.
+    //
+    // TODO this is similar to CelPropertiesWindow::onCommitChange()
+    m_pendingChanges = false;
   }
 
   // ContextObserver impl
-  void onActiveSiteChange(const Site& site) override {
+  void onActiveSiteChange(const Site& site) override
+  {
+    onCommitChange();
     if (isVisible())
-      setLayer(const_cast<Doc*>(site.document()),
-               const_cast<Layer*>(site.layer()));
+      setLayer(const_cast<Doc*>(site.document()), const_cast<Layer*>(site.layer()));
     else if (m_layer)
       setLayer(nullptr, nullptr);
   }
 
   // DocObserver impl
-  void onLayerNameChange(DocEvent& ev) override {
+  void onLayerNameChange(DocEvent& ev) override
+  {
     if (m_layer == ev.layer())
       updateFromLayer();
   }
 
-  void onLayerOpacityChange(DocEvent& ev) override {
+  void onLayerOpacityChange(DocEvent& ev) override
+  {
     if (m_layer == ev.layer())
       updateFromLayer();
   }
 
-  void onLayerBlendModeChange(DocEvent& ev) override {
+  void onLayerBlendModeChange(DocEvent& ev) override
+  {
     if (m_layer == ev.layer())
       updateFromLayer();
   }
 
-  void onPopupUserData() {
+  void onUserDataChange(DocEvent& ev) override
+  {
+    if (m_layer == ev.withUserData())
+      updateFromLayer();
+  }
+
+  void onToggleUserData()
+  {
     if (m_layer) {
-      m_userData = m_layer->userData();
-      if (show_user_data_popup(userData()->bounds(), m_userData)) {
-        onCommitChange();
-      }
+      m_userDataView.toggleVisibility();
+      g_window->remapWindow();
+      manager()->invalidate();
     }
   }
 
-  void updateFromLayer() {
+  void onTileset()
+  {
+    if (!m_layer || !m_layer->isTilemap())
+      return;
+
+    auto tilemap = static_cast<LayerTilemap*>(m_layer);
+    auto tileset = tilemap->tileset();
+
+    // Information about the tileset to be used for new tilemaps
+    TilesetSelector::Info tilesetInfo;
+    tilesetInfo.allowNewTileset = false;
+    tilesetInfo.newTileset = false;
+    tilesetInfo.grid = tileset->grid();
+    tilesetInfo.name = tileset->name();
+    tilesetInfo.baseIndex = tileset->baseIndex();
+    tilesetInfo.matchFlags = tileset->matchFlags();
+    tilesetInfo.tsi = tilemap->tilesetIndex();
+
+    try {
+      gen::TilesetSelectorWindow window;
+      TilesetSelector tilesetSel(tilemap->sprite(), tilesetInfo);
+      window.tilesetOptions()->addChild(&tilesetSel);
+      window.openWindowInForeground();
+      if (window.closer() != window.ok())
+        return;
+
+      // Save "advanced" options
+      tilesetSel.saveAdvancedPreferences();
+
+      tilesetInfo = tilesetSel.getInfo();
+
+      if (tileset->name() != tilesetInfo.name || tileset->baseIndex() != tilesetInfo.baseIndex ||
+          tileset->matchFlags() != tilesetInfo.matchFlags ||
+          tilesetInfo.tsi != tilemap->tilesetIndex()) {
+        ContextWriter writer(UIContext::instance());
+        Tx tx(writer, "Set Tileset Properties");
+        // User changed tilemap's tileset
+        if (tilesetInfo.tsi != tilemap->tilesetIndex()) {
+          tileset = tilemap->sprite()->tilesets()->get(tilesetInfo.tsi);
+          tx(new cmd::SetLayerTileset(tilemap, tilesetInfo.tsi));
+        }
+        if (tileset->name() != tilesetInfo.name)
+          tx(new cmd::SetTilesetName(tileset, tilesetInfo.name));
+        if (tileset->baseIndex() != tilesetInfo.baseIndex)
+          tx(new cmd::SetTilesetBaseIndex(tileset, tilesetInfo.baseIndex));
+        if (tileset->matchFlags() != tilesetInfo.matchFlags)
+          tx(new cmd::SetTilesetMatchFlags(tileset, tilesetInfo.matchFlags));
+        // TODO catch the tileset base index modification from the editor
+        App::instance()->mainWindow()->invalidate();
+        tx.commit();
+      }
+    }
+    catch (const std::exception& e) {
+      Console::showException(e);
+    }
+  }
+
+  void updateFromLayer()
+  {
     if (m_selfUpdate)
       return;
 
     m_timer.stop(); // Cancel current editions (just in case)
 
-    base::ScopedValue<bool> switchSelf(m_selfUpdate, true, false);
+    base::ScopedValue switchSelf(m_selfUpdate, true);
 
+    const bool tilemapVisibility = (m_layer && m_layer->isTilemap());
     if (m_layer) {
       name()->setText(m_layer->name().c_str());
       name()->setEnabled(true);
@@ -332,23 +444,32 @@ private:
         opacity()->setEnabled(false);
       }
 
-      m_userData = m_layer->userData();
+      color_t c = m_layer->userData().color();
+      m_userDataView.color()->setColor(
+        Color::fromRgb(rgba_getr(c), rgba_getg(c), rgba_getb(c), rgba_geta(c)));
+      m_userDataView.entry()->setText(m_layer->userData().text());
     }
     else {
-      name()->setText("No Layer");
+      name()->setText(Strings::layer_properties_no_layer());
       name()->setEnabled(false);
       mode()->setEnabled(false);
       opacity()->setEnabled(false);
-      m_userData = UserData();
+      m_userDataView.setVisible(false, false);
+    }
+
+    if (tileset()->isVisible() != tilemapVisibility) {
+      tileset()->setVisible(tilemapVisibility);
+      tileset()->parent()->layout();
     }
   }
 
   Timer m_timer;
-  Doc* m_document;
-  Layer* m_layer;
+  bool m_pendingChanges = false;
+  Doc* m_document = nullptr;
+  Layer* m_layer = nullptr;
   DocRange m_range;
-  bool m_selfUpdate;
-  UserData m_userData;
+  bool m_selfUpdate = false;
+  UserDataView m_userDataView;
 };
 
 LayerPropertiesCommand::LayerPropertiesCommand()
@@ -358,8 +479,7 @@ LayerPropertiesCommand::LayerPropertiesCommand()
 
 bool LayerPropertiesCommand::onEnabled(Context* context)
 {
-  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
-                             ContextFlags::HasActiveLayer);
+  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable | ContextFlags::HasActiveLayer);
 }
 
 void LayerPropertiesCommand::onExecute(Context* context)

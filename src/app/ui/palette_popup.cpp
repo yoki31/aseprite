@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/palette_popup.h"
@@ -22,6 +22,9 @@
 #include "app/ui_context.h"
 #include "ui/box.h"
 #include "ui/button.h"
+#include "ui/fit_bounds.h"
+#include "ui/keys.h"
+#include "ui/message.h"
 #include "ui/scale.h"
 #include "ui/theme.h"
 #include "ui/view.h"
@@ -41,39 +44,61 @@ PalettePopup::PalettePopup()
 
   addChild(m_popup);
 
-  m_paletteListBox.DoubleClickItem.connect([this]{ onLoadPal(); });
-  m_paletteListBox.FinishLoading.connect([this]{ onSearchChange(); });
-  m_popup->search()->Change.connect([this]{ onSearchChange(); });
-  m_popup->loadPal()->Click.connect([this]{ onLoadPal(); });
-  m_popup->openFolder()->Click.connect([this]{ onOpenFolder(); });
+  m_paletteListBox.DoubleClickItem.connect([this] { onLoadPal(); });
+  m_paletteListBox.FinishLoading.connect([this] { onSearchChange(); });
+  m_popup->search()->Change.connect([this] { onSearchChange(); });
+  m_popup->refresh()->Click.connect([this] { onRefresh(); });
+  m_popup->loadPal()->Click.connect([this] { onLoadPal(); });
+  m_popup->openFolder()->Click.connect([this] { onOpenFolder(); });
 
   m_popup->view()->attachToView(&m_paletteListBox);
 
   m_paletteListBox.PalChange.connect(&PalettePopup::onPalChange, this);
 
-  InitTheme.connect(
-    [this]{
-      setBorder(gfx::Border(4*guiscale()));
-    });
+  InitTheme.connect([this] { setBorder(gfx::Border(4 * guiscale())); });
   initTheme();
 }
 
-void PalettePopup::showPopup(const gfx::Rect& bounds)
+void PalettePopup::showPopup(ui::Display* display, const gfx::Rect& buttonPos)
 {
   m_popup->loadPal()->setEnabled(false);
   m_popup->openFolder()->setEnabled(false);
   m_paletteListBox.selectChild(NULL);
 
-  moveWindow(bounds);
+  fit_bounds(display,
+             this,
+             gfx::Rect(buttonPos.x, buttonPos.y2(), 32, 32),
+             [](const gfx::Rect& workarea,
+                gfx::Rect& bounds,
+                std::function<gfx::Rect(Widget*)> getWidgetBounds) {
+               bounds.w = workarea.w / 2;
+               bounds.h = workarea.h * 3 / 4;
+             });
 
   openWindowInForeground();
 }
 
-void PalettePopup::onPalChange(doc::Palette* palette)
+bool PalettePopup::onProcessMessage(ui::Message* msg)
 {
-  const bool state =
-    (UIContext::instance()->activeDocument() &&
-     palette != nullptr);
+  switch (msg->type()) {
+    case kKeyDownMessage: {
+      KeyMessage* keyMsg = static_cast<KeyMessage*>(msg);
+      KeyScancode scancode = keyMsg->scancode();
+      bool refresh = (scancode == kKeyF5 || (msg->ctrlPressed() && scancode == kKeyR) ||
+                      (msg->cmdPressed() && scancode == kKeyR));
+      if (refresh) {
+        onRefresh();
+        return true;
+      }
+      break;
+    }
+  }
+  return ui::PopupWindow::onProcessMessage(msg);
+}
+
+void PalettePopup::onPalChange(const doc::Palette* palette)
+{
+  const bool state = (UIContext::instance()->activeDocument() && palette != nullptr);
 
   m_popup->loadPal()->setEnabled(state);
   m_popup->openFolder()->setEnabled(state);
@@ -103,9 +128,14 @@ void PalettePopup::onSearchChange()
   m_popup->view()->layout();
 }
 
+void PalettePopup::onRefresh()
+{
+  m_paletteListBox.reload();
+}
+
 void PalettePopup::onLoadPal()
 {
-  doc::Palette* palette = m_paletteListBox.selectedPalette();
+  const doc::Palette* palette = m_paletteListBox.selectedPalette();
   if (!palette)
     return;
 
@@ -115,6 +145,7 @@ void PalettePopup::onLoadPal()
   UIContext::instance()->executeCommandFromMenuOrShortcut(cmd);
 
   m_paletteListBox.requestFocus();
+  m_paletteListBox.invalidate();
 }
 
 void PalettePopup::onOpenFolder()

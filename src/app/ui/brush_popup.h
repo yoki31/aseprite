@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2015  David Capello
 //
 // This program is distributed under the terms of
@@ -16,23 +16,24 @@
 
 namespace app {
 
-  class BrushPopup : public ui::PopupWindow {
-  public:
-    BrushPopup();
+class BrushPopup : public ui::PopupWindow {
+public:
+  BrushPopup();
 
-    void setBrush(doc::Brush* brush);
-    void regenerate(const gfx::Rect& box);
+  void setBrush(doc::Brush* brush);
+  void regenerate(ui::Display* display, const gfx::Point& pos);
 
-    static os::SurfaceRef createSurfaceForBrush(const doc::BrushRef& brush);
+  static os::SurfaceRef createSurfaceForBrush(const doc::BrushRef& brush,
+                                              const bool useOriginalImage = false);
 
-  private:
-    void onStandardBrush();
-    void onBrushChanges();
+private:
+  void onStandardBrush();
+  void onBrushChanges();
 
-    ui::VBox m_box;
-    ButtonSet m_standardBrushes;
-    ButtonSet* m_customBrushes;
-  };
+  ui::VBox m_box;
+  ButtonSet m_standardBrushes;
+  ButtonSet* m_customBrushes;
+};
 
 } // namespace app
 

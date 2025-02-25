@@ -1,11 +1,11 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/filename_field.h"
@@ -22,11 +22,9 @@ namespace app {
 
 using namespace ui;
 
-FilenameField::FilenameField(const Type type,
-                             const std::string& pathAndFilename)
-  : m_entry(type == EntryAndButton ? new ui::Entry(1024, ""): nullptr)
-  , m_button(type == EntryAndButton ? Strings::select_file_browse():
-                                      Strings::select_file_text())
+FilenameField::FilenameField(const Type type, const std::string& pathAndFilename)
+  : m_entry(type == EntryAndButton ? new ui::Entry(1024, "") : nullptr)
+  , m_button(type == EntryAndButton ? Strings::select_file_browse() : Strings::select_file_text())
 {
   setFocusStop(true);
   if (m_entry) {
@@ -41,20 +39,18 @@ FilenameField::FilenameField(const Type type,
   setFilename(pathAndFilename);
 
   if (m_entry) {
-    m_entry->Change.connect(
-      [this]{
-        m_file = m_entry->text();
-        Change();
-      });
+    m_entry->Change.connect([this] {
+      m_file = m_entry->text();
+      Change();
+    });
   }
 
-  m_button.Click.connect(
-    [this]{
-      std::string fn = SelectFile();
-      if (!fn.empty()) {
-        setFilename(fn);
-      }
-    });
+  m_button.Click.connect([this] {
+    std::string fn = SelectFile();
+    if (!fn.empty()) {
+      setFilename(fn);
+    }
+  });
 
   initTheme();
 }
@@ -94,7 +90,7 @@ void FilenameField::onInitTheme(ui::InitThemeEvent& ev)
   HBox::onInitTheme(ev);
   setChildSpacing(0);
 
-  auto theme = skin::SkinTheme::instance();
+  auto theme = skin::SkinTheme::get(this);
   ui::Style* style = theme->styles.miniButton();
   if (style)
     m_button.setStyle(style);

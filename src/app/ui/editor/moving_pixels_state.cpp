@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -8,7 +8,7 @@
 #define MOVPIXS_TRACE(...) // TRACE(__VA_ARGS__)
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/editor/moving_pixels_state.h"
@@ -26,6 +26,7 @@
 #include "app/pref/preferences.h"
 #include "app/tools/ink.h"
 #include "app/tools/tool.h"
+#include "app/transformation.h"
 #include "app/ui/context_bar.h"
 #include "app/ui/editor/editor.h"
 #include "app/ui/editor/editor_customization_delegate.h"
@@ -52,56 +53,56 @@
 #include "ui/view.h"
 
 #include <cstring>
-#include <limits>
 
 namespace app {
 
 using namespace ui;
 
-MovingPixelsState::MovingPixelsState(Editor* editor, MouseMessage* msg, PixelsMovementPtr pixelsMovement, HandleType handle)
+MovingPixelsState::MovingPixelsState(Editor* editor,
+                                     MouseMessage* msg,
+                                     PixelsMovementPtr pixelsMovement,
+                                     HandleType handle)
   : m_pixelsMovement(pixelsMovement)
+  , m_delayedMouseMove(this, editor, 5)
   , m_editor(editor)
   , m_observingEditor(false)
   , m_discarded(false)
   , m_renderTimer(50)
-  , m_oldSpritePos(std::numeric_limits<int>::min(),
-                   std::numeric_limits<int>::min())
 {
+  m_pixelsMovement->setDelegate(this);
+
   // MovingPixelsState needs a selection tool to avoid problems
   // sharing the extra cel between the drawing cursor preview and the
   // pixels movement/transformation preview.
-  //ASSERT(!editor->getCurrentEditorInk()->isSelection());
+  // ASSERT(!editor->getCurrentEditorInk()->isSelection());
 
   UIContext* context = UIContext::instance();
 
   if (handle != NoHandle) {
     gfx::Point pt = editor->screenToEditor(msg->position());
-    m_pixelsMovement->catchImage(pt, handle);
+    m_pixelsMovement->catchImage(gfx::PointF(pt), handle);
 
     editor->captureMouse();
   }
 
   // Setup transparent mode/mask color
   if (Preferences::instance().selection.autoOpaque()) {
-    Preferences::instance().selection.opaque(
-      editor->layer()->isBackground());
+    Preferences::instance().selection.opaque(editor->layer()->isBackground());
   }
   onTransparentColorChange();
 
-  m_renderTimer.Tick.connect([this]{ onRenderTimer(); });
+  m_renderTimer.Tick.connect([this] { onRenderTimer(); });
 
   // Hook BeforeCommandExecution signal so we know if the user wants
   // to execute other command, so we can drop pixels.
-  m_ctxConn =
-    context->BeforeCommandExecution.connect(&MovingPixelsState::onBeforeCommandExecution, this);
+  m_ctxConn = context->BeforeCommandExecution.connect(&MovingPixelsState::onBeforeCommandExecution,
+                                                      this);
 
   // Listen to any change to the transparent color from the ContextBar.
-  m_opaqueConn =
-    Preferences::instance().selection.opaque.AfterChange.connect(
-      [this]{ onTransparentColorChange(); });
-  m_transparentConn =
-    Preferences::instance().selection.transparentColor.AfterChange.connect(
-      [this]{ onTransparentColorChange(); });
+  m_opaqueConn = Preferences::instance().selection.opaque.AfterChange.connect(
+    [this] { onTransparentColorChange(); });
+  m_transparentConn = Preferences::instance().selection.transparentColor.AfterChange.connect(
+    [this] { onTransparentColorChange(); });
 
   // Add the current editor as filter for key message of the manager
   // so we can catch the Enter key, and avoid to execute the
@@ -112,7 +113,7 @@ MovingPixelsState::MovingPixelsState(Editor* editor, MouseMessage* msg, PixelsMo
   m_observingEditor = true;
 
   ContextBar* contextBar = App::instance()->contextBar();
-  contextBar->updateForMovingPixels();
+  contextBar->updateForMovingPixels(getTransformation(editor));
   contextBar->add_observer(this);
 
   App::instance()->mainWindow()->getTimeline()->add_observer(this);
@@ -136,12 +137,12 @@ MovingPixelsState::~MovingPixelsState()
   m_editor->document()->generateMaskBoundaries();
 }
 
-void MovingPixelsState::translate(const gfx::Point& delta)
+void MovingPixelsState::translate(const gfx::PointF& delta)
 {
   if (m_pixelsMovement->isDragging())
     m_pixelsMovement->dropImageTemporarily();
 
-  m_pixelsMovement->catchImageAgain(gfx::Point(0, 0), MovePixelsHandle);
+  m_pixelsMovement->catchImageAgain(gfx::PointF(0, 0), MovePixelsHandle);
   m_pixelsMovement->moveImage(delta, PixelsMovement::NormalMovement);
   m_pixelsMovement->dropImageTemporarily();
   m_editor->updateStatusBar();
@@ -165,9 +166,20 @@ void MovingPixelsState::shift(int dx, int dy)
   m_editor->updateStatusBar();
 }
 
+void MovingPixelsState::updateTransformation(const Transformation& t)
+{
+  m_pixelsMovement->setTransformation(t);
+  m_editor->updateStatusBar();
+}
+
 void MovingPixelsState::onEnterState(Editor* editor)
 {
   StandbyState::onEnterState(editor);
+
+  // Get the active key action so we can lock the FineControl action
+  // until we release/press again the Ctrl key just in case if we
+  // started moving the pixels with the Ctrl key pressed.
+  m_lockedKeyAction = getCurrentKeyAction();
 
   update_screen_for_document(editor->document());
 }
@@ -179,7 +191,7 @@ void MovingPixelsState::onEditorGotFocus(Editor* editor)
   // when we are back to an editor in MovingPixelsState. Without this
   // we would see the SelectionModeField instead which doesn't make
   // sense on MovingPixelsState).
-  contextBar->updateForMovingPixels();
+  contextBar->updateForMovingPixels(getTransformation(editor));
 }
 
 EditorState::LeaveAction MovingPixelsState::onLeaveState(Editor* editor, EditorState* newState)
@@ -243,24 +255,19 @@ void MovingPixelsState::onActiveToolChange(Editor* editor, tools::Tool* tool)
   if (m_pixelsMovement) {
     // We don't want to drop pixels in case the user change the tool
     // for scrolling/zooming/picking colors.
-    if ((!tool->getInk(0)->isSelection() ||
-         !tool->getInk(1)->isSelection()) &&
-        (!tool->getInk(0)->isScrollMovement() ||
-         !tool->getInk(1)->isScrollMovement()) &&
-        (!tool->getInk(0)->isZoom() ||
-         !tool->getInk(1)->isZoom()) &&
-        (!tool->getInk(0)->isEyedropper() ||
-         !tool->getInk(1)->isEyedropper())) {
+    if ((!tool->getInk(0)->isSelection() || !tool->getInk(1)->isSelection()) &&
+        (!tool->getInk(0)->isScrollMovement() || !tool->getInk(1)->isScrollMovement()) &&
+        (!tool->getInk(0)->isZoom() || !tool->getInk(1)->isZoom()) &&
+        (!tool->getInk(0)->isEyedropper() || !tool->getInk(1)->isEyedropper())) {
       // We have to drop pixels
       dropPixels();
     }
     // If we've temporarily gone to a non-selection tool and now we're
     // back, we've just to update the context bar to show the "moving
     // pixels" controls (e.g. OK/Cancel movement buttons).
-    else if (tool->getInk(0)->isSelection() ||
-             tool->getInk(1)->isSelection()) {
+    else if (tool->getInk(0)->isSelection() || tool->getInk(1)->isSelection()) {
       ContextBar* contextBar = App::instance()->contextBar();
-      contextBar->updateForMovingPixels();
+      contextBar->updateForMovingPixels(getTransformation(editor));
     }
   }
 }
@@ -270,6 +277,8 @@ bool MovingPixelsState::onMouseDown(Editor* editor, MouseMessage* msg)
   ASSERT(m_pixelsMovement);
   ASSERT(editor == m_editor);
 
+  m_delayedMouseMove.onMouseDown(msg);
+
   // Set this editor as the active one and setup the ContextBar for
   // moving pixels. This is needed in case that the user is working
   // with a couple of Editors, in one is moving pixels and the other
@@ -278,11 +287,10 @@ bool MovingPixelsState::onMouseDown(Editor* editor, MouseMessage* msg)
   ctx->setActiveView(editor->getDocView());
 
   ContextBar* contextBar = App::instance()->contextBar();
-  contextBar->updateForMovingPixels();
+  contextBar->updateForMovingPixels(getTransformation(editor));
 
   // Start scroll loop
-  if (editor->checkForScroll(msg) ||
-      editor->checkForZoom(msg))
+  if (editor->checkForScroll(msg) || editor->checkForZoom(msg))
     return true;
 
   // Call the eyedropper command
@@ -296,24 +304,22 @@ bool MovingPixelsState::onMouseDown(Editor* editor, MouseMessage* msg)
   Doc* document = editor->document();
 
   // Transform selected pixels
-  if (document->isMaskVisible() &&
-      decorator->getTransformHandles(editor) &&
+  if (document->isMaskVisible() && decorator->getTransformHandles(editor) &&
       (!Preferences::instance().selection.modifiersDisableHandles() ||
        msg->modifiers() == kKeyNoneModifier)) {
     TransformHandles* transfHandles = decorator->getTransformHandles(editor);
 
     // Get the handle covered by the mouse.
-    HandleType handle = transfHandles->getHandleAtPoint(editor,
-                                                        msg->position(),
-                                                        getTransformation(editor));
+    HandleType handle =
+      transfHandles->getHandleAtPoint(editor, msg->position(), getTransformation(editor));
 
     if (handle != NoHandle) {
       if (layer_is_locked(editor))
         return true;
 
       // Re-catch the image
-      m_pixelsMovement->catchImageAgain(
-        editor->screenToEditor(msg->position()), handle);
+      gfx::Point pt = editor->screenToEditor(msg->position());
+      m_pixelsMovement->catchImageAgain(gfx::PointF(pt), handle);
 
       editor->captureMouse();
       return true;
@@ -328,16 +334,20 @@ bool MovingPixelsState::onMouseDown(Editor* editor, MouseMessage* msg)
       return true;
 
     // In case that the user is pressing the copy-selection keyboard shortcut.
-    EditorCustomizationDelegate* customization = editor->getCustomizationDelegate();
-    if ((customization) &&
-        int(customization->getPressedKeyAction(KeyContext::TranslatingSelection) & KeyAction::CopySelection)) {
-      // Stamp the pixels to create the copy.
-      m_pixelsMovement->stampImage();
+    if (auto customization = editor->getCustomizationDelegate()) {
+      if (int(customization->getPressedKeyAction(KeyContext::TranslatingSelection) &
+              KeyAction::CopySelection)) {
+        // Stamp the pixels to create the copy.
+        m_pixelsMovement->stampImage();
+      }
+
+      // Set the locked key action again to lock the FineControl until
+      // with press Ctrl key again.
+      m_lockedKeyAction = getCurrentKeyAction();
     }
 
     // Re-catch the image
-    m_pixelsMovement->catchImageAgain(
-      editor->screenToEditor(msg->position()), MovePixelsHandle);
+    m_pixelsMovement->catchImageAgain(editor->screenToEditorF(msg->position()), MovePixelsHandle);
 
     editor->captureMouse();
     return true;
@@ -357,6 +367,8 @@ bool MovingPixelsState::onMouseUp(Editor* editor, MouseMessage* msg)
   ASSERT(m_pixelsMovement);
   ASSERT(editor == m_editor);
 
+  m_delayedMouseMove.onMouseUp(msg);
+
   // Drop the image temporarily in this location (where the user releases the mouse)
   m_pixelsMovement->dropImageTemporarily();
 
@@ -374,83 +386,67 @@ bool MovingPixelsState::onMouseMove(Editor* editor, MouseMessage* msg)
 
   // If there is a button pressed
   if (m_pixelsMovement->isDragging()) {
-    // Auto-scroll
-    gfx::Point mousePos = editor->autoScroll(msg, AutoScroll::MouseDir);
-
-    // Get the position of the mouse in the sprite
-    gfx::Point spritePos = editor->screenToEditor(mousePos);
-    if (spritePos == m_oldSpritePos) {
-      // Avoid redrawing everything if the position in the canvas didn't change.
-      // TODO remove this if we add support for anti-aliasing in the
-      //      transformations
-      return true;
-    }
-    m_oldSpritePos = spritePos;
-
-    m_renderTimer.start();
-    m_pixelsMovement->setFastMode(true);
-
-    // Get the customization for the pixels movement (snap to grid, angle snap, etc.).
-    KeyContext keyContext = KeyContext::Normal;
-    switch (m_pixelsMovement->handle()) {
-      case MovePixelsHandle:
-        keyContext = KeyContext::TranslatingSelection;
-        break;
-      case ScaleNWHandle:
-      case ScaleNHandle:
-      case ScaleNEHandle:
-      case ScaleWHandle:
-      case ScaleEHandle:
-      case ScaleSWHandle:
-      case ScaleSHandle:
-      case ScaleSEHandle:
-        keyContext = KeyContext::ScalingSelection;
-        break;
-      case RotateNWHandle:
-      case RotateNHandle:
-      case RotateNEHandle:
-      case RotateWHandle:
-      case RotateEHandle:
-      case RotateSWHandle:
-      case RotateSHandle:
-      case RotateSEHandle:
-        keyContext = KeyContext::RotatingSelection;
-        break;
-    }
-
-    PixelsMovement::MoveModifier moveModifier = PixelsMovement::NormalMovement;
-    KeyAction action = editor->getCustomizationDelegate()
-      ->getPressedKeyAction(keyContext);
-
-    if (int(action & KeyAction::SnapToGrid))
-      moveModifier |= PixelsMovement::SnapToGridMovement;
-
-    if (int(action & KeyAction::AngleSnap))
-      moveModifier |= PixelsMovement::AngleSnapMovement;
-
-    if (int(action & KeyAction::MaintainAspectRatio))
-      moveModifier |= PixelsMovement::MaintainAspectRatioMovement;
-
-    if (int(action & KeyAction::ScaleFromCenter))
-      moveModifier |= PixelsMovement::ScaleFromPivot;
-
-    if (int(action & KeyAction::LockAxis))
-      moveModifier |= PixelsMovement::LockAxisMovement;
-
-    // Invalidate handles
-    Decorator* decorator = static_cast<Decorator*>(editor->decorator());
-    TransformHandles* transfHandles = decorator->getTransformHandles(editor);
-    transfHandles->invalidateHandles(editor, m_pixelsMovement->getTransformation());
-
-    // Drag the image to that position
-    m_pixelsMovement->moveImage(spritePos, moveModifier);
-
-    editor->updateStatusBar();
+    if (m_delayedMouseMove.onMouseMove(msg))
+      m_renderTimer.start();
     return true;
   }
 
   // Use StandbyState implementation
   return StandbyState::onMouseMove(editor, msg);
+}
+
+void MovingPixelsState::onCommitMouseMove(Editor* editor, const gfx::PointF& spritePos)
+{
+  ASSERT(m_pixelsMovement);
+
+  if (!m_pixelsMovement->isDragging())
+    return;
+
+  m_pixelsMovement->setFastMode(true);
+
+  const KeyAction action = getCurrentKeyAction();
+  PixelsMovement::MoveModifier moveModifier = PixelsMovement::NormalMovement;
+  bool snapToGrid = (Preferences::instance().selection.snapToGrid() &&
+                     m_editor->docPref().grid.snap());
+  if (bool(action & KeyAction::SnapToGrid))
+    snapToGrid = !snapToGrid;
+
+  if (snapToGrid)
+    moveModifier |= PixelsMovement::SnapToGridMovement;
+
+  if (int(action & KeyAction::AngleSnap))
+    moveModifier |= PixelsMovement::AngleSnapMovement;
+
+  if (int(action & KeyAction::MaintainAspectRatio))
+    moveModifier |= PixelsMovement::MaintainAspectRatioMovement;
+
+  if (int(action & KeyAction::ScaleFromCenter))
+    moveModifier |= PixelsMovement::ScaleFromPivot;
+
+  if (int(action & KeyAction::LockAxis))
+    moveModifier |= PixelsMovement::LockAxisMovement;
+
+  // Enable the FineControl only if we've already released and pressed
+  // the key again (because it )
+  if (int(action & KeyAction::FineControl) &&
+      int(m_lockedKeyAction & KeyAction::FineControl) == 0) {
+    moveModifier |= PixelsMovement::FineControl;
+  }
+
+  // Invalidate handles
+  Decorator* decorator = static_cast<Decorator*>(m_editor->decorator());
+  TransformHandles* transfHandles = decorator->getTransformHandles(m_editor);
+  const Transformation& transformation = m_pixelsMovement->getTransformation();
+  transfHandles->invalidateHandles(m_editor, transformation);
+
+  // Drag the image to that position
+  m_pixelsMovement->moveImage(spritePos, moveModifier);
+
+  // Update context bar and status bar
+  ContextBar* contextBar = App::instance()->contextBar();
+  contextBar->updateForMovingPixels(transformation);
+
+  m_editor->updateStatusBar();
 }
 
 bool MovingPixelsState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
@@ -475,9 +471,12 @@ bool MovingPixelsState::onKeyDown(Editor* editor, KeyMessage* msg)
     return false;
   ASSERT(editor == m_editor);
 
+  // Reset the locked action just to indicate that we can use the
+  // FineControl now (e.g. if we pressed another modifier key).
+  m_lockedKeyAction = KeyAction::None;
+
   if (msg->scancode() == kKeyEnter || // TODO make this key customizable
-      msg->scancode() == kKeyEnterPad ||
-      msg->scancode() == kKeyEsc) {
+      msg->scancode() == kKeyEnterPad || msg->scancode() == kKeyEsc) {
     dropPixels();
 
     // The escape key drop pixels and deselect the mask.
@@ -499,6 +498,10 @@ bool MovingPixelsState::onKeyUp(Editor* editor, KeyMessage* msg)
   if (!isActiveEditor())
     return false;
   ASSERT(editor == m_editor);
+
+  // Reset the locked action just to indicate that we can use the
+  // FineControl now (e.g. if we release the Ctrl key).
+  m_lockedKeyAction = KeyAction::None;
 
   // Use StandbyState implementation
   return StandbyState::onKeyUp(editor, msg);
@@ -529,33 +532,68 @@ bool MovingPixelsState::onUpdateStatusBar(Editor* editor)
   int w = int(transform.bounds().w);
   int h = int(transform.bounds().h);
   int gcd = base::gcd(w, h);
-  StatusBar::instance()->setStatusText(
-    100,
-    fmt::format(
-      ":pos: {} {} :size: {:3d} {:3d} :selsize: {} {} [{:.02f}% {:.02f}%] :angle: {:.1f} :aspect_ratio: {}:{}",
-      int(transform.bounds().x),
-      int(transform.bounds().y),
-      imageSize.w,
-      imageSize.h,
-      w,
-      h,
-      (double)w*100.0/imageSize.w,
-      (double)h*100.0/imageSize.h,
-      180.0 * transform.angle() / PI,
-      w/gcd,
-      h/gcd));
+  StatusBar::instance()->setStatusText(100,
+                                       fmt::format(":pos: {} {}"
+                                                   " :size: {} {}"
+                                                   " :selsize: {} {} [{:.02f}% {:.02f}%]"
+                                                   " :angle: {:.1f}"
+                                                   " :aspect_ratio: {}:{}",
+                                                   int(transform.bounds().x),
+                                                   int(transform.bounds().y),
+                                                   imageSize.w,
+                                                   imageSize.h,
+                                                   w,
+                                                   h,
+                                                   (double)w * 100.0 / imageSize.w,
+                                                   (double)h * 100.0 / imageSize.h,
+                                                   180.0 * transform.angle() / PI,
+                                                   w / gcd,
+                                                   h / gcd));
 
   return true;
 }
 
 bool MovingPixelsState::acceptQuickTool(tools::Tool* tool)
 {
-  return
-    (!m_pixelsMovement ||
-     tool->getInk(0)->isSelection() ||
-     tool->getInk(0)->isEyedropper() ||
-     tool->getInk(0)->isScrollMovement() ||
-     tool->getInk(0)->isZoom());
+  return (!m_pixelsMovement || tool->getInk(0)->isSelection() || tool->getInk(0)->isEyedropper() ||
+          tool->getInk(0)->isScrollMovement() || tool->getInk(0)->isZoom());
+}
+
+void MovingPixelsState::dropPixelsIfLayerIsSelected(doc::Layer* layer)
+{
+  if (!isActiveDocument())
+    return;
+
+  if (m_pixelsMovement) {
+    const Site& site = m_pixelsMovement->site();
+    if (site.layer() == layer || site.range().contains(layer)) {
+      dropPixels();
+    }
+  }
+}
+
+void MovingPixelsState::onBeforeLayerVisibilityChange(Editor* editor,
+                                                      doc::Layer* layer,
+                                                      bool newState)
+{
+  // If the layer visibility of any selected layer changes, we just
+  // drop the pixels (it's the easiest way to avoid modifying hidden
+  // pixels).
+  dropPixelsIfLayerIsSelected(layer);
+}
+
+void MovingPixelsState::onBeforeLayerEditableChange(Editor* editor,
+                                                    doc::Layer* layer,
+                                                    bool newState)
+{
+  // If the layer 'editable' flag of any selected layer changes,
+  // we just drop the pixels (it's the easiest way to avoid modifying
+  // hidden pixels and it's the simplest treatment when
+  // locking the layer)
+  // TODO: It would be more convenient not to drop the selected
+  // image if the 'lock' then 'unlock' actions are performed without
+  // any transformation taking place.
+  dropPixelsIfLayerIsSelected(layer);
 }
 
 // Before executing any command, we drop the pixels (go back to standby).
@@ -570,16 +608,14 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
     return;
 
   if (layer_is_locked(m_editor) &&
-      (command->id() == CommandId::Flip() ||
-      command->id() == CommandId::Cut() ||
-      command->id() == CommandId::Clear() ||
-      command->id() == CommandId::Rotate())) {
+      (command->id() == CommandId::Flip() || command->id() == CommandId::Cut() ||
+       command->id() == CommandId::Clear() || command->id() == CommandId::Rotate())) {
     ev.cancel();
     return;
   }
 
   // We don't need to drop the pixels if a MoveMaskCommand of Content is executed.
-  if (MoveMaskCommand* moveMaskCmd = dynamic_cast<MoveMaskCommand*>(command)) {
+  if (auto moveMaskCmd = dynamic_cast<MoveMaskCommand*>(command)) {
     if (moveMaskCmd->getTarget() == MoveMaskCommand::Content) {
       if (layer_is_locked(m_editor)) {
         ev.cancel();
@@ -591,7 +627,7 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
         m_pixelsMovement->shift(delta.x, delta.y);
       }
       else {
-        translate(delta);
+        translate(gfx::PointF(delta));
       }
       // We've processed the selection content movement right here.
       ev.cancel();
@@ -600,8 +636,7 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
   }
   // Don't drop pixels if the user zooms/scrolls/picks a color
   // using commands.
-  else if ((command->id() == CommandId::Zoom()) ||
-           (command->id() == CommandId::Scroll()) ||
+  else if ((command->id() == CommandId::Zoom()) || (command->id() == CommandId::Scroll()) ||
            (command->id() == CommandId::Eyedropper()) ||
            // DiscardBrush is used by Eyedropper command
            (command->id() == CommandId::DiscardBrush())) {
@@ -610,8 +645,7 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
   }
   // Intercept the "Cut" or "Copy" command to handle them locally
   // with the current m_pixelsMovement data.
-  else if (command->id() == CommandId::Cut() ||
-           command->id() == CommandId::Copy() ||
+  else if (command->id() == CommandId::Cut() || command->id() == CommandId::Copy() ||
            command->id() == CommandId::Clear()) {
     // Copy the floating image to the clipboard on Cut/Copy.
     if (command->id() != CommandId::Clear()) {
@@ -620,9 +654,19 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
       std::unique_ptr<Mask> floatingMask;
       m_pixelsMovement->getDraggedImageCopy(floatingImage, floatingMask);
 
-      clipboard::copy_image(floatingImage.get(),
-                            floatingMask.get(),
-                            document->sprite()->palette(m_editor->frame()));
+      if (floatingImage->isTilemap()) {
+        Site site = m_editor->getSite();
+        ASSERT(site.tileset());
+        Clipboard::instance()->copyTilemap(floatingImage.get(),
+                                           floatingMask.get(),
+                                           document->sprite()->palette(m_editor->frame()),
+                                           site.tileset());
+      }
+      else {
+        Clipboard::instance()->copyImage(floatingImage.get(),
+                                         floatingMask.get(),
+                                         document->sprite()->palette(m_editor->frame()));
+      }
     }
 
     // Clear floating pixels on Cut/Clear.
@@ -651,7 +695,7 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
   // Flip Horizontally/Vertically commands are handled manually to
   // avoid dropping the floating region of pixels.
   else if (command->id() == CommandId::Flip()) {
-    if (FlipCommand* flipCommand = dynamic_cast<FlipCommand*>(command)) {
+    if (auto flipCommand = dynamic_cast<FlipCommand*>(command)) {
       this->flip(flipCommand->getFlipType());
 
       ev.cancel();
@@ -660,7 +704,7 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
   }
   // Rotate is quite simple, we can add the angle to the current transformation.
   else if (command->id() == CommandId::Rotate()) {
-    if (RotateCommand* rotate = dynamic_cast<RotateCommand*>(command)) {
+    if (auto rotate = dynamic_cast<RotateCommand*>(command)) {
       if (rotate->flipMask()) {
         this->rotate(rotate->angle());
 
@@ -685,6 +729,10 @@ void MovingPixelsState::onBeforeCommandExecution(CommandExecutionEvent& ev)
       return;
     }
   }
+  else if (command->id() == CommandId::ToggleTilesMode()) {
+    ev.cancel();
+    return;
+  }
 
   if (m_pixelsMovement)
     dropPixels();
@@ -702,8 +750,7 @@ void MovingPixelsState::onBeforeFrameChanged(Editor* editor)
   if (!isActiveDocument())
     return;
 
-  if (m_pixelsMovement &&
-      !m_pixelsMovement->canHandleFrameChange()) {
+  if (m_pixelsMovement && !m_pixelsMovement->canHandleFrameChange()) {
     dropPixels();
   }
 }
@@ -733,9 +780,7 @@ void MovingPixelsState::onTransparentColorChange()
   bool opaque = Preferences::instance().selection.opaque();
   setTransparentColor(
     opaque,
-    opaque ?
-      app::Color::fromMask():
-      Preferences::instance().selection.transparentColor());
+    opaque ? app::Color::fromMask() : Preferences::instance().selection.transparentColor());
 }
 
 void MovingPixelsState::onRenderTimer()
@@ -750,10 +795,7 @@ void MovingPixelsState::onDropPixels(ContextBarObserver::DropAction action)
     return;
 
   switch (action) {
-
-    case ContextBarObserver::DropPixels:
-      dropPixels();
-      break;
+    case ContextBarObserver::DropPixels: dropPixels(); break;
 
     case ContextBarObserver::CancelDrag:
       m_pixelsMovement->discardImage(PixelsMovement::DontCommitChanges);
@@ -765,6 +807,12 @@ void MovingPixelsState::onDropPixels(ContextBarObserver::DropAction action)
   }
 }
 
+void MovingPixelsState::onPivotChange()
+{
+  ContextBar* contextBar = App::instance()->contextBar();
+  contextBar->updateForMovingPixels(getTransformation(m_editor));
+}
+
 void MovingPixelsState::setTransparentColor(bool opaque, const app::Color& color)
 {
   ASSERT(m_pixelsMovement);
@@ -773,8 +821,8 @@ void MovingPixelsState::setTransparentColor(bool opaque, const app::Color& color
   ASSERT(layer);
 
   try {
-    m_pixelsMovement->setMaskColor(
-      opaque, color_utils::color_for_target_mask(color, ColorTarget(layer)));
+    m_pixelsMovement->setMaskColor(opaque,
+                                   color_utils::color_for_target_mask(color, ColorTarget(layer)));
   }
   catch (const LockedDocException& ex) {
     Console::showException(ex);
@@ -822,10 +870,46 @@ void MovingPixelsState::removeAsEditorObserver()
 
 void MovingPixelsState::removePixelsMovement()
 {
+  // Avoid receiving a onCommitMouseMove() message when
+  // m_pixelsMovement is already nullptr.
+  m_delayedMouseMove.stopTimer();
+
   m_pixelsMovement.reset();
   m_ctxConn.disconnect();
   m_opaqueConn.disconnect();
   m_transparentConn.disconnect();
+}
+
+KeyAction MovingPixelsState::getCurrentKeyAction() const
+{
+  KeyContext keyContext = KeyContext::Normal;
+  switch (m_pixelsMovement->handle()) {
+    case MovePixelsHandle: keyContext = KeyContext::TranslatingSelection; break;
+    case ScaleNWHandle:
+    case ScaleNHandle:
+    case ScaleNEHandle:
+    case ScaleWHandle:
+    case ScaleEHandle:
+    case ScaleSWHandle:
+    case ScaleSHandle:
+    case ScaleSEHandle:    keyContext = KeyContext::ScalingSelection; break;
+    case RotateNWHandle:
+    case RotateNEHandle:
+    case RotateSWHandle:
+    case RotateSEHandle:   keyContext = KeyContext::RotatingSelection; break;
+    case SkewNHandle:
+    case SkewWHandle:
+    case SkewEHandle:
+    case SkewSHandle:      keyContext = KeyContext::ScalingSelection; break;
+  }
+
+  // Ask to the editor the customization delegate for the active key
+  // action/modifier for the pixels movement (snap to grid, angle
+  // snap, etc.).
+  if (auto customizable = m_editor->getCustomizationDelegate())
+    return customizable->getPressedKeyAction(keyContext);
+  else
+    return KeyAction::None;
 }
 
 } // namespace app

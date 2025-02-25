@@ -1,12 +1,12 @@
 // Aseprite UI Library
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "ui/timer.h"
@@ -29,7 +29,7 @@ static Timers timers; // Registered timers
 static int running_timers = 0;
 
 Timer::Timer(int interval, Widget* owner)
-  : m_owner(owner ? owner: Manager::getDefault())
+  : m_owner(owner ? owner : Manager::getDefault())
   , m_interval(interval)
   , m_running(false)
   , m_lastTick(0)
@@ -56,6 +56,10 @@ Timer::~Timer()
 void Timer::start()
 {
   assert_ui_thread();
+
+  // Infinite timer? Do nothing.
+  if (m_interval == 0)
+    return;
 
   m_lastTick = base::current_tick();
   if (!m_running) {
@@ -109,6 +113,8 @@ void Timer::pollTimers()
 
     for (auto timer : timers) {
       if (timer && timer->isRunning()) {
+        ASSERT(timer->interval() > 0);
+
         int64_t count = ((t - timer->m_lastTick) / timer->m_interval);
         if (count > 0) {
           timer->m_lastTick += count * timer->m_interval;
@@ -141,7 +147,7 @@ bool Timer::getNextTimeout(double& timeout)
     if (timer && timer->isRunning()) {
       int64_t diff = (timer->m_lastTick + timer->m_interval) - t;
       if (diff < 0) {
-        timeout = 0.0;         // Right-now
+        timeout = 0.0; // Right-now
         return true;
       }
       else {

@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2020-2021  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/color_button.h"
@@ -14,7 +14,6 @@
 #include "app/app.h"
 #include "app/color.h"
 #include "app/color_utils.h"
-#include "app/modules/editors.h"
 #include "app/modules/gfx.h"
 #include "app/site.h"
 #include "app/ui/color_bar.h"
@@ -23,10 +22,11 @@
 #include "app/ui/skin/skin_theme.h"
 #include "app/ui/status_bar.h"
 #include "app/ui_context.h"
-#include "base/clamp.h"
 #include "doc/layer.h"
 #include "doc/sprite.h"
 #include "gfx/rect_io.h"
+#include "os/system.h"
+#include "os/window.h"
 #include "ui/ui.h"
 
 #include <algorithm>
@@ -51,6 +51,7 @@ ColorButton::ColorButton(const app::Color& color,
   , m_color(color)
   , m_pixelFormat(pixelFormat)
   , m_window(nullptr)
+  , m_desktopCoords(false)
   , m_dependOnLayer(false)
   , m_options(options)
 {
@@ -64,7 +65,7 @@ ColorButton::~ColorButton()
 {
   UIContext::instance()->remove_observer(this);
 
-  delete m_window;       // widget, window
+  delete m_window; // widget, window
 }
 
 PixelFormat ColorButton::pixelFormat() const
@@ -115,7 +116,9 @@ app::Color ColorButton::getColorByPosition(const gfx::Point& pos)
 void ColorButton::onInitTheme(InitThemeEvent& ev)
 {
   ButtonBase::onInitTheme(ev);
-  setStyle(SkinTheme::instance()->styles.colorButton());
+
+  auto theme = SkinTheme::get(this);
+  setStyle(theme->styles.colorButton());
 
   if (m_window)
     m_window->initTheme();
@@ -124,10 +127,8 @@ void ColorButton::onInitTheme(InitThemeEvent& ev)
 bool ColorButton::onProcessMessage(Message* msg)
 {
   switch (msg->type()) {
-
     case kOpenMessage:
-      if (!m_windowDefaultBounds.isEmpty() &&
-          this->isVisible()) {
+      if (!m_windowDefaultBounds.isEmpty() && this->isVisible()) {
         openPopup(false);
       }
       break;
@@ -137,25 +138,60 @@ bool ColorButton::onProcessMessage(Message* msg)
         m_window->closeWindow(NULL);
       break;
 
-    case kMouseEnterMessage:
-      StatusBar::instance()->showColor(0, "", m_color);
-      break;
+    case kMouseEnterMessage: StatusBar::instance()->showColor(0, m_color); break;
 
-    case kMouseLeaveMessage:
-      StatusBar::instance()->showDefaultText();
-      break;
+    case kMouseLeaveMessage: StatusBar::instance()->showDefaultText(); break;
 
     case kMouseMoveMessage:
+      // TODO code similar to TileButton::onProcessMessage()
       if (hasCapture()) {
         gfx::Point mousePos = static_cast<MouseMessage*>(msg)->position();
-        Widget* picked = manager()->pick(mousePos);
         app::Color color = m_color;
 
-        if (picked && picked != this) {
-          // Pick a color from a IColorSource
-          if (IColorSource* colorSource = dynamic_cast<IColorSource*>(picked)) {
-            color = colorSource->getColorByPosition(mousePos);
+        // Try to pick a color from a IColorSource, then get the color
+        // from the display surface, and finally from the desktop. The
+        // desktop must be a last resource method, because in macOS it
+        // will ask for permissions to record the screen.
+        os::Window* nativeWindow = msg->display()->nativeWindow();
+        gfx::Point screenPos = nativeWindow->pointToScreen(mousePos);
+
+        Widget* picked = manager()->pickFromScreenPos(screenPos);
+        if (picked == this) {
+          setColor(m_startDragColor);
+          break;
+        }
+        else {
+          m_mouseLeft = true;
+        }
+
+        IColorSource* colorSource = dynamic_cast<IColorSource*>(picked);
+        if (colorSource) {
+          nativeWindow = picked->display()->nativeWindow();
+          mousePos = nativeWindow->pointFromScreen(screenPos);
+        }
+        else {
+          gfx::Color gfxColor = gfx::ColorNone;
+
+          // Get color from native window surface
+          if (nativeWindow->contentRect().contains(screenPos)) {
+            mousePos = nativeWindow->pointFromScreen(screenPos);
+            if (nativeWindow->surface()->bounds().contains(mousePos))
+              gfxColor = nativeWindow->surface()->getPixel(mousePos.x, mousePos.y);
           }
+
+          // Or get the color from the screen
+          if (gfxColor == gfx::ColorNone) {
+            gfxColor = os::instance()->getColorFromScreen(screenPos);
+          }
+
+          color = app::Color::fromRgb(gfx::getr(gfxColor),
+                                      gfx::getg(gfxColor),
+                                      gfx::getb(gfxColor),
+                                      gfx::geta(gfxColor));
+        }
+
+        if (colorSource) {
+          color = colorSource->getColorByPosition(mousePos);
         }
 
         // Did the color change?
@@ -167,11 +203,11 @@ bool ColorButton::onProcessMessage(Message* msg)
 
     case kSetCursorMessage:
       if (hasCapture()) {
-        ui::set_mouse_cursor(kCustomCursor, SkinTheme::instance()->cursors.eyedropper());
+        auto theme = SkinTheme::get(this);
+        ui::set_mouse_cursor(kCustomCursor, theme->cursors.eyedropper());
         return true;
       }
       break;
-
   }
 
   return ButtonBase::onProcessMessage(msg);
@@ -183,7 +219,7 @@ void ColorButton::onSizeHint(SizeHintEvent& ev)
 
   gfx::Rect box;
   getTextIconInfo(&box);
-  box.w = 64*guiscale();
+  box.w = 64 * guiscale();
 
   gfx::Size sz = ev.sizeHint();
   sz.w = std::max(sz.w, box.w);
@@ -193,7 +229,7 @@ void ColorButton::onSizeHint(SizeHintEvent& ev)
 void ColorButton::onPaint(PaintEvent& ev)
 {
   Graphics* g = ev.graphics();
-  SkinTheme* theme = static_cast<SkinTheme*>(this->theme());
+  auto theme = SkinTheme::get(this);
   gfx::Rect rc = clientBounds();
 
   gfx::Color bg = bgColor();
@@ -206,9 +242,9 @@ void ColorButton::onPaint(PaintEvent& ev)
   // When the button is pushed, show the negative
   m_dependOnLayer = false;
   if (isSelected()) {
-    color = app::Color::fromRgb(255-m_color.getRed(),
-                                255-m_color.getGreen(),
-                                255-m_color.getBlue());
+    color = app::Color::fromRgb(255 - m_color.getRed(),
+                                255 - m_color.getGreen(),
+                                255 - m_color.getBlue());
   }
   // When the button is not pressed, show the real color
   else {
@@ -216,28 +252,23 @@ void ColorButton::onPaint(PaintEvent& ev)
 
     // Show transparent color in indexed sprites as mask color when we
     // are in a transparent layer.
-    if (color.getType() == app::Color::IndexType &&
-        current_editor &&
-        current_editor->sprite() &&
-        current_editor->sprite()->pixelFormat() == IMAGE_INDEXED) {
+    auto editor = Editor::activeEditor();
+    if (color.getType() == app::Color::IndexType && editor && editor->sprite() &&
+        editor->sprite()->pixelFormat() == IMAGE_INDEXED) {
       m_dependOnLayer = true;
 
-      if (int(current_editor->sprite()->transparentColor()) == color.getIndex() &&
-          current_editor->layer() &&
-          !current_editor->layer()->isBackground()) {
+      if (int(editor->sprite()->transparentColor()) == color.getIndex() && editor->layer() &&
+          !editor->layer()->isBackground()) {
         color = app::Color::fromMask();
       }
     }
   }
 
-  draw_color_button(g, rc,
-                    color,
-                    (doc::ColorMode)m_pixelFormat,
-                    hasMouseOver(), false);
+  draw_color_button(g, rc, color, (doc::ColorMode)m_pixelFormat, hasMouse(), false);
 
   // Draw text
   std::string str = m_color.toHumanReadableString(m_pixelFormat,
-    app::Color::ShortHumanReadableString);
+                                                  app::Color::ShortHumanReadableString);
 
   setTextQuiet(str.c_str());
 
@@ -251,9 +282,9 @@ void ColorButton::onPaint(PaintEvent& ev)
   g->drawUIText(text(), textcolor, gfx::ColorNone, textrc.origin(), 0);
 }
 
-void ColorButton::onClick(Event& ev)
+void ColorButton::onClick()
 {
-  ButtonBase::onClick(ev);
+  ButtonBase::onClick();
 
   // If the popup window was not created or shown yet..
   if (!m_window || !m_window->isVisible()) {
@@ -266,13 +297,29 @@ void ColorButton::onClick(Event& ev)
   }
 }
 
+void ColorButton::onStartDrag()
+{
+  m_startDragColor = m_color;
+  m_mouseLeft = false;
+}
+
+void ColorButton::onSelectWhenDragging()
+{
+  if (m_mouseLeft)
+    setSelected(false);
+  else
+    ButtonBase::onSelectWhenDragging();
+}
+
 void ColorButton::onLoadLayout(ui::LoadLayoutEvent& ev)
 {
   if (canPin()) {
     bool pinned = false;
+
+    m_desktopCoords = false;
     ev.stream() >> pinned;
     if (ev.stream() && pinned)
-      ev.stream() >> m_windowDefaultBounds;
+      ev.stream() >> m_windowDefaultBounds >> m_desktopCoords;
 
     m_hiddenPopupBounds = m_windowDefaultBounds;
   }
@@ -280,8 +327,12 @@ void ColorButton::onLoadLayout(ui::LoadLayoutEvent& ev)
 
 void ColorButton::onSaveLayout(ui::SaveLayoutEvent& ev)
 {
-  if (canPin() && m_window && m_window->isPinned())
-    ev.stream() << 1 << ' ' << m_window->bounds();
+  if (canPin() && m_window && m_window->isPinned()) {
+    if (m_desktopCoords)
+      ev.stream() << 1 << ' ' << m_window->lastNativeFrame() << ' ' << 1;
+    else
+      ev.stream() << 1 << ' ' << m_window->bounds() << ' ' << 0;
+  }
   else
     ev.stream() << 0;
 }
@@ -293,8 +344,7 @@ bool ColorButton::isPopupVisible()
 
 void ColorButton::openPopup(const bool forcePinned)
 {
-  const bool pinned = forcePinned ||
-    (!m_windowDefaultBounds.isEmpty());
+  const bool pinned = forcePinned || (!m_windowDefaultBounds.isEmpty());
 
   if (m_window == NULL) {
     m_window = new ColorPopup(m_options);
@@ -303,36 +353,38 @@ void ColorButton::openPopup(const bool forcePinned)
   }
 
   m_window->setColor(m_color, ColorPopup::ChangeType);
+  m_window->remapWindow();
+
+  fit_bounds(display(),
+             m_window,
+             gfx::Rect(m_window->sizeHint()),
+             [this, pinned, forcePinned](const gfx::Rect& workarea,
+                                         gfx::Rect& winBounds,
+                                         std::function<gfx::Rect(Widget*)> getWidgetBounds) {
+               if (!pinned || (forcePinned && m_hiddenPopupBounds.isEmpty())) {
+                 gfx::Rect bounds = getWidgetBounds(this);
+
+                 winBounds.x = std::clamp(bounds.x, workarea.x, workarea.x2() - winBounds.w);
+                 if (bounds.y2() + winBounds.h <= workarea.y2())
+                   winBounds.y = std::max(workarea.y, bounds.y2());
+                 else
+                   winBounds.y = std::max(workarea.y, bounds.y - winBounds.h);
+               }
+               else if (forcePinned) {
+                 winBounds = convertBounds(m_hiddenPopupBounds);
+               }
+               else {
+                 winBounds = convertBounds(m_windowDefaultBounds);
+               }
+             });
+
   m_window->openWindow();
-
-  gfx::Rect winBounds;
-  if (!pinned || (forcePinned && m_hiddenPopupBounds.isEmpty())) {
-    winBounds = gfx::Rect(m_window->bounds().origin(),
-                          m_window->sizeHint());
-    winBounds.x = base::clamp(bounds().x, 0, ui::display_w()-winBounds.w);
-    if (bounds().y2() <= ui::display_h()-winBounds.h)
-      winBounds.y = std::max(0, bounds().y2());
-    else
-      winBounds.y = std::max(0, bounds().y-winBounds.h);
-  }
-  else if (forcePinned) {
-    winBounds = m_hiddenPopupBounds;
-  }
-  else {
-    winBounds = m_windowDefaultBounds;
-  }
-  winBounds.x = base::clamp(winBounds.x, 0, ui::display_w()-winBounds.w);
-  winBounds.y = base::clamp(winBounds.y, 0, ui::display_h()-winBounds.h);
-  m_window->setBounds(winBounds);
-
-  m_window->manager()->dispatchMessages();
-  m_window->layout();
 
   m_window->setPinned(pinned);
 
   // Add the ColorButton area to the ColorPopup hot-region
   if (!pinned) {
-    gfx::Rect rc = bounds().createUnion(m_window->bounds());
+    gfx::Rect rc = boundsOnScreen().createUnion(m_window->boundsOnScreen());
     rc.enlarge(8);
     gfx::Region rgn(rc);
     static_cast<PopupWindow*>(m_window)->setHotRegion(rgn);
@@ -349,7 +401,14 @@ void ColorButton::closePopup()
 
 void ColorButton::onWindowClose(ui::CloseEvent& ev)
 {
-  m_hiddenPopupBounds = m_window->bounds();
+  if (get_multiple_displays()) {
+    m_desktopCoords = true;
+    m_hiddenPopupBounds = m_window->lastNativeFrame();
+  }
+  else {
+    m_desktopCoords = false;
+    m_hiddenPopupBounds = m_window->bounds();
+  }
 }
 
 void ColorButton::onWindowColorChange(const app::Color& color)
@@ -379,6 +438,25 @@ void ColorButton::onActiveSiteChange(const Site& site)
         m_window->setVisible(true);
     }
   }
+}
+
+gfx::Rect ColorButton::convertBounds(const gfx::Rect& bounds) const
+{
+  // Convert to desktop
+  if (get_multiple_displays() && !m_desktopCoords) {
+    auto nativeWindow = display()->nativeWindow();
+    return gfx::Rect(nativeWindow->pointToScreen(bounds.origin()),
+                     nativeWindow->pointToScreen(bounds.point2()));
+  }
+  // Convert to display
+  else if (!get_multiple_displays() && m_desktopCoords) {
+    auto nativeWindow = display()->nativeWindow();
+    return gfx::Rect(nativeWindow->pointFromScreen(bounds.origin()),
+                     nativeWindow->pointFromScreen(bounds.point2()));
+  }
+  // No conversion is required
+  else
+    return bounds;
 }
 
 } // namespace app

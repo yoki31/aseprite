@@ -1,11 +1,12 @@
 // Aseprite
+// Copyright (C) 2019  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/cmd/move_cel.h"
@@ -20,21 +21,23 @@
 #include "app/cmd/set_cel_frame.h"
 #include "app/cmd/unlink_cel.h"
 #include "app/doc.h"
-#include "app/util/create_cel_copy.h"
+#include "app/util/cel_ops.h"
 #include "doc/cel.h"
 #include "doc/layer.h"
 #include "doc/primitives.h"
 #include "doc/sprite.h"
+#include "render/rasterize.h"
 #include "render/render.h"
 
-namespace app {
-namespace cmd {
+namespace app { namespace cmd {
 
 using namespace doc;
 
-MoveCel::MoveCel(
-  LayerImage* srcLayer, frame_t srcFrame,
-  LayerImage* dstLayer, frame_t dstFrame, bool continuous)
+MoveCel::MoveCel(LayerImage* srcLayer,
+                 frame_t srcFrame,
+                 LayerImage* dstLayer,
+                 frame_t dstFrame,
+                 bool continuous)
   : m_srcLayer(srcLayer)
   , m_dstLayer(dstLayer)
   , m_srcFrame(srcFrame)
@@ -73,37 +76,44 @@ void MoveCel::onExecute()
   while (dstSprite->totalFrames() <= m_dstFrame)
     executeAndAdd(new cmd::AddFrame(dstSprite, dstSprite->totalFrames()));
 
-  Image* srcImage = (srcCel ? srcCel->image(): NULL);
+  Image* srcImage = (srcCel ? srcCel->image() : NULL);
   ImageRef dstImage;
   dstCel = dstLayer->cel(m_dstFrame);
   if (dstCel)
     dstImage = dstCel->imageRef();
 
-  bool createLink =
-    (srcLayer == dstLayer && m_continuous);
+  bool createLink = (srcLayer == dstLayer && m_continuous);
 
   // For background layer
   if (dstLayer->isBackground()) {
     ASSERT(dstCel);
     ASSERT(dstImage);
-    if (!dstCel || !dstImage ||
-        !srcCel || !srcImage)
+    if (!dstCel || !dstImage || !srcCel || !srcImage)
       return;
+
+    ASSERT(!dstLayer->isTilemap()); // TODO support background tilemaps
 
     if (createLink) {
       executeAndAdd(new cmd::SetCelData(dstCel, srcCel->dataRef()));
       executeAndAdd(new cmd::UnlinkCel(srcCel));
     }
+    // Rasterize tilemap into the regular image background layer
+    else if (srcLayer->isTilemap()) {
+      ImageRef tmp(Image::createCopy(dstImage.get()));
+      render::rasterize(tmp.get(), srcCel, 0, 0, false);
+      executeAndAdd(new cmd::CopyRect(dstImage.get(), tmp.get(), gfx::Clip(tmp->bounds())));
+    }
     else {
-      BlendMode blend = (srcLayer->isBackground() ?
-                         BlendMode::SRC:
-                         BlendMode::NORMAL);
+      BlendMode blend = (srcLayer->isBackground() ? BlendMode::SRC : BlendMode::NORMAL);
 
       ImageRef tmp(Image::createCopy(dstImage.get()));
-      render::composite_image(
-        tmp.get(), srcImage,
-        srcSprite->palette(m_srcFrame),
-        srcCel->x(), srcCel->y(), 255, blend);
+      render::composite_image(tmp.get(),
+                              srcImage,
+                              srcSprite->palette(m_srcFrame),
+                              srcCel->x(),
+                              srcCel->y(),
+                              255,
+                              blend);
       executeAndAdd(new cmd::CopyRect(dstImage.get(), tmp.get(), gfx::Clip(tmp->bounds())));
     }
     executeAndAdd(new cmd::ClearCel(srcCel));
@@ -119,7 +129,7 @@ void MoveCel::onExecute()
       executeAndAdd(new cmd::SetCelFrame(srcCel, m_dstFrame));
     }
     else {
-      dstCel = create_cel_copy(srcCel, dstSprite, dstLayer, m_dstFrame);
+      dstCel = create_cel_copy(this, srcCel, dstSprite, dstLayer, m_dstFrame);
 
       executeAndAdd(new cmd::AddCel(dstLayer, dstCel));
       executeAndAdd(new cmd::ClearCel(srcCel));
@@ -131,10 +141,7 @@ void MoveCel::onFireNotifications()
 {
   CmdSequence::onFireNotifications();
   static_cast<Doc*>(m_dstLayer.layer()->sprite()->document())
-    ->notifyCelMoved(
-      m_srcLayer.layer(), m_srcFrame,
-      m_dstLayer.layer(), m_dstFrame);
+    ->notifyCelMoved(m_srcLayer.layer(), m_srcFrame, m_dstLayer.layer(), m_dstFrame);
 }
 
-} // namespace cmd
-} // namespace app
+}} // namespace app::cmd

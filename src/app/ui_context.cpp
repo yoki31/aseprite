@@ -1,19 +1,18 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui_context.h"
 
 #include "app/app.h"
 #include "app/doc.h"
-#include "app/modules/editors.h"
 #include "app/site.h"
 #include "app/ui/color_bar.h"
 #include "app/ui/doc_view.h"
@@ -25,7 +24,6 @@
 #include "app/ui/timeline/timeline.h"
 #include "app/ui/workspace.h"
 #include "app/ui/workspace_tabs.h"
-#include "base/mutex.h"
 #include "doc/sprite.h"
 #include "ui/system.h"
 
@@ -35,9 +33,7 @@ namespace app {
 
 UIContext* UIContext::m_instance = nullptr;
 
-UIContext::UIContext()
-  : m_lastSelectedView(nullptr)
-  , m_closedDocs(preferences())
+UIContext::UIContext() : m_closedDocs(preferences())
 {
   ASSERT(m_instance == nullptr);
   m_instance = this;
@@ -56,7 +52,7 @@ UIContext::~UIContext()
   // it when the program crashes by any other reason, and we would
   // like to see that other reason instead of this assert.
 
-  //ASSERT(documents().empty());
+  // ASSERT(documents().empty());
 }
 
 bool UIContext::isUIAvailable() const
@@ -68,6 +64,10 @@ DocView* UIContext::activeView() const
 {
   if (!isUIAvailable())
     return nullptr;
+
+  // Bypass the active workspace view.
+  if (m_targetView)
+    return m_targetView;
 
   Workspace* workspace = App::instance()->workspace();
   if (!workspace)
@@ -95,25 +95,30 @@ void UIContext::setActiveView(DocView* docView)
 
   // Do nothing cases: 1) the view is already selected, or 2) the view
   // is the a preview.
-  if (m_lastSelectedView == docView ||
-      (docView && docView->isPreview()))
+  if (m_lastSelectedView == docView || (docView && docView->isPreview()))
     return;
 
+  Editor* editor = nullptr;
   if (docView) {
-    current_editor = docView->editor();
+    editor = docView->editor();
     mainWin->getTabsBar()->selectTab(docView);
 
     if (mainWin->getWorkspace()->activeView() != docView)
       mainWin->getWorkspace()->setActiveView(docView);
 
-    if (current_editor)
-      current_editor->requestFocus();
+    if (editor)
+      editor->requestFocus();
   }
-  else
-    current_editor = nullptr;
 
-  mainWin->getTimeline()->updateUsingEditor(current_editor);
-  mainWin->getPreviewEditor()->updateUsingEditor(current_editor);
+  // This is the only place where we change the Editor::m_activeEditor
+  // value.
+  //
+  // TODO probably Editor should have an observer to update its active
+  //      editor value.
+  Editor::_setActiveEditor(editor);
+
+  mainWin->getTimeline()->updateUsingEditor(editor);
+  mainWin->getPreviewEditor()->updateUsingEditor(editor);
 
   // Change the image-type of color bar.
   ColorBar::instance()->setPixelFormat(app_get_current_pixel_format());
@@ -140,7 +145,7 @@ void UIContext::onSetActiveDocument(Doc* document, bool notify)
   app::Context::onSetActiveDocument(document, false);
 
   DocView* docView = getFirstDocView(document);
-  if (docView) {     // The view can be null if we are in --batch mode
+  if (docView) { // The view can be null if we are in --batch mode
     setActiveView(docView);
     notify = false;
   }
@@ -172,8 +177,7 @@ void UIContext::onSetActiveFrame(const doc::frame_t frame)
 void UIContext::onSetRange(const DocRange& range)
 {
   Timeline* timeline =
-    (App::instance()->mainWindow() ?
-     App::instance()->mainWindow()->getTimeline(): nullptr);
+    (App::instance()->mainWindow() ? App::instance()->mainWindow()->getTimeline() : nullptr);
   if (timeline) {
     timeline->setRange(range);
   }
@@ -190,6 +194,16 @@ void UIContext::onSetSelectedColors(const doc::PalettePicks& picks)
   }
   else if (!isUIAvailable())
     Context::onSetSelectedColors(picks);
+}
+
+void UIContext::onSetSelectedTiles(const doc::PalettePicks& picks)
+{
+  if (activeView()) {
+    if (ColorBar* colorBar = ColorBar::instance())
+      colorBar->getTilesView()->setSelectedEntries(picks);
+  }
+  else if (!isUIAvailable())
+    Context::onSetSelectedTiles(picks);
 }
 
 DocView* UIContext::getFirstDocView(Doc* document) const
@@ -288,10 +302,9 @@ void UIContext::onAddDocument(Doc* doc)
     return;
 
   // Add a new view for this document
-  DocView* view = new DocView(
-    lastSelectedDoc(),
-    DocView::Normal,
-    App::instance()->mainWindow()->getPreviewEditor());
+  DocView* view = new DocView(lastSelectedDoc(),
+                              DocView::Normal,
+                              App::instance()->mainWindow()->getPreviewEditor());
 
   // Add a tab with the new view for the document
   App::instance()->workspace()->addView(view);
@@ -334,20 +347,24 @@ void UIContext::onGetActiveSite(Site* site) const
       // could enable the range even if the timeline is hidden. In
       // this way we avoid using the timeline selection unexpectedly.
       Timeline* timeline = App::instance()->timeline();
-      if (timeline &&
-          timeline->isVisible() &&
-          timeline->range().enabled()) {
+      if (timeline && timeline->isVisible() && timeline->range().enabled()) {
         site->range(timeline->range());
       }
       else {
         ColorBar* colorBar = ColorBar::instance();
-        if (colorBar &&
-            colorBar->getPaletteView()->getSelectedEntriesCount() > 0) {
+        if (colorBar && colorBar->getPaletteView()->getSelectedEntriesCount() > 0) {
           site->focus(Site::InColorBar);
 
           doc::PalettePicks picks;
           colorBar->getPaletteView()->getSelectedEntries(picks);
           site->selectedColors(picks);
+        }
+        else if (colorBar && colorBar->getTilesView()->getSelectedEntriesCount() > 0) {
+          site->focus(Site::InColorBar);
+
+          doc::PalettePicks picks;
+          colorBar->getTilesView()->getSelectedEntries(picks);
+          site->selectedTiles(picks);
         }
         else {
           site->focus(Site::InEditor);

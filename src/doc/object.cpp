@@ -1,39 +1,35 @@
 // Aseprite Document Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "doc/object.h"
 
 #include "base/debug.h"
-#include "base/mutex.h"
-#include "base/scoped_lock.h"
 
 #include <map>
+#include <mutex>
 
 namespace doc {
 
-static base::mutex mutex;
+static std::mutex g_mutex;
 static ObjectId newId = 0;
 // TODO Profile this and see if an unordered_map is better
 static std::map<ObjectId, Object*> objects;
 
-Object::Object(ObjectType type)
-  : m_type(type)
-  , m_id(0)
-  , m_version(0)
+Object::Object(ObjectType type) : m_type(type), m_id(0), m_version(0)
 {
 }
 
 Object::Object(const Object& other)
   : m_type(other.m_type)
-  , m_id(0) // We don't copy the ID
+  , m_id(0)      // We don't copy the ID
   , m_version(0) // We don't copy the version
 {
 }
@@ -54,7 +50,7 @@ const ObjectId Object::id() const
   // The first time the ID is request, we store the object in the
   // "objects" hash table.
   if (!m_id) {
-    base::scoped_lock hold(mutex);
+    const std::lock_guard lock(g_mutex);
     m_id = ++newId;
     objects.insert(std::make_pair(m_id, const_cast<Object*>(this)));
   }
@@ -63,7 +59,7 @@ const ObjectId Object::id() const
 
 void Object::setId(ObjectId id)
 {
-  base::scoped_lock hold(mutex);
+  const std::lock_guard lock(g_mutex);
 
   if (m_id) {
     auto it = objects.find(m_id);
@@ -80,13 +76,16 @@ void Object::setId(ObjectId id)
     if (objects.find(m_id) != objects.end()) {
       Object* obj = objects.find(m_id)->second;
       if (obj) {
-        TRACEARGS("ASSERT FAILED: Object with id", m_id,
-                  "of kind", int(obj->type()),
-                  "version", obj->version(), "should not exist");
+        TRACEARGS("ASSERT FAILED: Object with id",
+                  m_id,
+                  "of kind",
+                  int(obj->type()),
+                  "version",
+                  obj->version(),
+                  "should not exist");
       }
       else {
-        TRACEARGS("ASSERT FAILED: Object with id", m_id,
-                  "registered as nullptr should not exist");
+        TRACEARGS("ASSERT FAILED: Object with id", m_id, "registered as nullptr should not exist");
       }
     }
     ASSERT(objects.find(m_id) == objects.end());
@@ -102,7 +101,7 @@ void Object::setVersion(ObjectVersion version)
 
 Object* get_object(ObjectId id)
 {
-  base::scoped_lock hold(mutex);
+  const std::lock_guard lock(g_mutex);
   auto it = objects.find(id);
   if (it != objects.end())
     return it->second;

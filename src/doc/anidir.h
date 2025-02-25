@@ -1,4 +1,5 @@
 // Aseprite Document Library
+// Copyright (c) 2021 Igara Studio S.A.
 // Copyright (c) 2001-2018 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -12,14 +13,15 @@
 
 namespace doc {
 
-  enum class AniDir {
-    FORWARD = 0,
-    REVERSE = 1,
-    PING_PONG = 2,
-  };
+enum class AniDir {
+  FORWARD = 0,
+  REVERSE = 1,
+  PING_PONG = 2,         // First playback is in forward
+  PING_PONG_REVERSE = 3, // First playback is in reverse
+};
 
-  std::string convert_anidir_to_string(AniDir anidir);
-  doc::AniDir convert_string_to_anidir(const std::string& s);
+std::string convert_anidir_to_string(AniDir anidir);
+doc::AniDir convert_string_to_anidir(const std::string& s);
 
 } // namespace doc
 

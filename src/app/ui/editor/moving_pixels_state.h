@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2024  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -10,6 +10,7 @@
 #pragma once
 
 #include "app/ui/context_bar_observer.h"
+#include "app/ui/editor/delayed_mouse_move.h"
 #include "app/ui/editor/editor_observer.h"
 #include "app/ui/editor/handle_type.h"
 #include "app/ui/editor/pixels_movement.h"
@@ -20,96 +21,115 @@
 #include "ui/timer.h"
 
 namespace doc {
-  class Image;
+class Layer;
 }
 
 namespace app {
-  class CommandExecutionEvent;
-  class Editor;
+class CommandExecutionEvent;
+class Editor;
 
-  class MovingPixelsState
-    : public StandbyState
-    , EditorObserver
-    , TimelineObserver
-    , ContextBarObserver {
-  public:
-    MovingPixelsState(Editor* editor, ui::MouseMessage* msg, PixelsMovementPtr pixelsMovement, HandleType handle);
-    virtual ~MovingPixelsState();
+class MovingPixelsState : public StandbyState,
+                          EditorObserver,
+                          TimelineObserver,
+                          ContextBarObserver,
+                          PixelsMovementDelegate,
+                          DelayedMouseMoveDelegate {
+public:
+  MovingPixelsState(Editor* editor,
+                    ui::MouseMessage* msg,
+                    PixelsMovementPtr pixelsMovement,
+                    HandleType handle);
+  virtual ~MovingPixelsState();
 
-    bool canHandleFrameChange() const {
-      return m_pixelsMovement->canHandleFrameChange();
-    }
+  bool canHandleFrameChange() const { return m_pixelsMovement->canHandleFrameChange(); }
 
-    void translate(const gfx::Point& delta);
-    void rotate(double angle);
-    void flip(doc::algorithm::FlipType flipType);
-    void shift(int dx, int dy);
+  void translate(const gfx::PointF& delta);
+  void rotate(double angle);
+  void flip(doc::algorithm::FlipType flipType);
+  void shift(int dx, int dy);
 
-    // EditorState
-    virtual void onEnterState(Editor* editor) override;
-    virtual void onEditorGotFocus(Editor* editor) override;
-    virtual LeaveAction onLeaveState(Editor* editor, EditorState* newState) override;
-    virtual void onActiveToolChange(Editor* editor, tools::Tool* tool) override;
-    virtual bool onMouseDown(Editor* editor, ui::MouseMessage* msg) override;
-    virtual bool onMouseUp(Editor* editor, ui::MouseMessage* msg) override;
-    virtual bool onMouseMove(Editor* editor, ui::MouseMessage* msg) override;
-    virtual bool onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos) override;
-    virtual bool onKeyDown(Editor* editor, ui::KeyMessage* msg) override;
-    virtual bool onKeyUp(Editor* editor, ui::KeyMessage* msg) override;
-    virtual bool onUpdateStatusBar(Editor* editor) override;
-    virtual bool acceptQuickTool(tools::Tool* tool) override;
-    virtual bool requireBrushPreview() override { return false; }
+  void updateTransformation(const Transformation& t);
 
-    // EditorObserver
-    virtual void onDestroyEditor(Editor* editor) override;
-    virtual void onBeforeFrameChanged(Editor* editor) override;
-    virtual void onBeforeLayerChanged(Editor* editor) override;
+  // EditorState
+  void onEnterState(Editor* editor) override;
+  void onEditorGotFocus(Editor* editor) override;
+  LeaveAction onLeaveState(Editor* editor, EditorState* newState) override;
+  void onActiveToolChange(Editor* editor, tools::Tool* tool) override;
+  bool onMouseDown(Editor* editor, ui::MouseMessage* msg) override;
+  bool onMouseUp(Editor* editor, ui::MouseMessage* msg) override;
+  bool onMouseMove(Editor* editor, ui::MouseMessage* msg) override;
+  bool onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos) override;
+  bool onKeyDown(Editor* editor, ui::KeyMessage* msg) override;
+  bool onKeyUp(Editor* editor, ui::KeyMessage* msg) override;
+  bool onUpdateStatusBar(Editor* editor) override;
+  bool acceptQuickTool(tools::Tool* tool) override;
+  bool requireBrushPreview() override { return false; }
+  void onBeforeLayerVisibilityChange(Editor* editor, doc::Layer* layer, bool newState) override;
+  void onBeforeLayerEditableChange(Editor* editor, doc::Layer* layer, bool newState) override;
 
-    // TimelineObserver
-    virtual void onBeforeRangeChanged(Timeline* timeline) override;
+  // EditorObserver
+  void onDestroyEditor(Editor* editor) override;
+  void onBeforeFrameChanged(Editor* editor) override;
+  void onBeforeLayerChanged(Editor* editor) override;
 
-    // ContextBarObserver
-    virtual void onDropPixels(ContextBarObserver::DropAction action) override;
+  // TimelineObserver
+  void onBeforeRangeChanged(Timeline* timeline) override;
 
-    virtual Transformation getTransformation(Editor* editor) override;
+  // ContextBarObserver
+  void onDropPixels(ContextBarObserver::DropAction action) override;
 
-  private:
-    void onTransparentColorChange();
-    void onRenderTimer();
+  // PixelsMovementDelegate
+  void onPivotChange() override;
 
-    // ContextObserver
-    void onBeforeCommandExecution(CommandExecutionEvent& ev);
+  Transformation getTransformation(Editor* editor) override;
 
-    void setTransparentColor(bool opaque, const app::Color& color);
-    void dropPixels();
+private:
+  // DelayedMouseMoveDelegate impl
+  void onCommitMouseMove(Editor* editor, const gfx::PointF& spritePos) override;
 
-    bool isActiveDocument() const;
-    bool isActiveEditor() const;
+  void onTransparentColorChange();
+  void onRenderTimer();
 
-    void removeAsEditorObserver();
-    void removePixelsMovement();
+  // ContextObserver
+  void onBeforeCommandExecution(CommandExecutionEvent& ev);
 
-    // Helper member to move/translate selection and pixels.
-    PixelsMovementPtr m_pixelsMovement;
-    Editor* m_editor;
-    bool m_observingEditor;
+  void setTransparentColor(bool opaque, const app::Color& color);
+  void dropPixels();
 
-    // True if the image was discarded (e.g. when a "Cut" command was
-    // used to remove the dragged image).
-    bool m_discarded;
+  bool isActiveDocument() const;
+  bool isActiveEditor() const;
 
-    ui::Timer m_renderTimer;
+  void removeAsEditorObserver();
+  void removePixelsMovement();
 
-    // Position of the mouse in the canvas to avoid redrawing when the
-    // mouse position changes (only we redraw when the canvas position
-    // changes).
-    gfx::Point m_oldSpritePos;
+  KeyAction getCurrentKeyAction() const;
 
-    obs::connection m_ctxConn;
-    obs::connection m_opaqueConn;
-    obs::connection m_transparentConn;
-  };
+  // Used on 'onBeforeLayerVisibilityChange' and 'onBeforeLayerEditableChange' functions.
+  void dropPixelsIfLayerIsSelected(doc::Layer* layer);
+
+  // Helper member to move/translate selection and pixels.
+  PixelsMovementPtr m_pixelsMovement;
+  DelayedMouseMove m_delayedMouseMove;
+  Editor* m_editor;
+  bool m_observingEditor;
+
+  // True if the image was discarded (e.g. when a "Cut" command was
+  // used to remove the dragged image).
+  bool m_discarded;
+
+  // Variable to store the initial key action to ignore it until we
+  // re-press the key. This was done mainly to avoid activating the
+  // fine control with the Ctrl key when we copy the selection until
+  // the user release and press again the Ctrl key.
+  KeyAction m_lockedKeyAction = KeyAction::None;
+
+  ui::Timer m_renderTimer;
+
+  obs::connection m_ctxConn;
+  obs::connection m_opaqueConn;
+  obs::connection m_transparentConn;
+};
 
 } // namespace app
 
-#endif  // APP_UI_EDITOR_MOVING_PIXELS_STATE_H_INCLUDED
+#endif // APP_UI_EDITOR_MOVING_PIXELS_STATE_H_INCLUDED

@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2021  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/popup_window_pin.h"
@@ -28,8 +28,7 @@ using namespace ui;
 PopupWindowPin::PopupWindowPin(const std::string& text,
                                const ClickBehavior clickBehavior,
                                const bool canPin)
-  : PopupWindow(text, clickBehavior,
-                EnterBehavior::CloseOnEnter, canPin)
+  : PopupWindow(text, clickBehavior, EnterBehavior::CloseOnEnter, canPin)
   , m_pinned(false)
 {
 }
@@ -40,8 +39,8 @@ void PopupWindowPin::setPinned(const bool pinned)
   if (m_pinned)
     makeFloating();
   else {
-    gfx::Rect rc = bounds();
-    rc.enlarge(8);
+    gfx::Rect rc = boundsOnScreen();
+    rc.enlarge(8 * guiscale());
     setHotRegion(gfx::Region(rc));
     makeFixed();
   }
@@ -50,7 +49,6 @@ void PopupWindowPin::setPinned(const bool pinned)
 bool PopupWindowPin::onProcessMessage(Message* msg)
 {
   switch (msg->type()) {
-
     case kOpenMessage: {
       if (!m_pinned)
         setPinned(false);
@@ -64,7 +62,6 @@ bool PopupWindowPin::onProcessMessage(Message* msg)
         m_pinned = false;
       break;
     }
-
   }
 
   return PopupWindow::onProcessMessage(msg);

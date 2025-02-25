@@ -1,4 +1,5 @@
 // Aseprite
+// Copyright (C) 2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -9,37 +10,37 @@
 #pragma once
 
 #include "base/concurrent_queue.h"
-#include "base/thread.h"
 
 #include <memory>
+#include <thread>
 
 namespace app {
 
-  class Resource;
-  class ResourcesLoaderDelegate;
+class Resource;
+class ResourcesLoaderDelegate;
 
-  class ResourcesLoader {
-  public:
-    ResourcesLoader(ResourcesLoaderDelegate* delegate);
-    ~ResourcesLoader();
+class ResourcesLoader {
+public:
+  ResourcesLoader(std::unique_ptr<ResourcesLoaderDelegate>&& delegate);
+  ~ResourcesLoader();
 
-    void cancel();
-    bool isDone() const { return m_done; }
-    bool next(std::unique_ptr<Resource>& resource);
-    void reload();
+  void cancel();
+  bool isDone() const { return m_done; }
+  bool next(std::unique_ptr<Resource>& resource);
+  void reload();
 
-  private:
-    void threadLoadResources();
-    base::thread* createThread();
+private:
+  void threadLoadResources();
+  std::thread* createThread();
 
-    typedef base::concurrent_queue<Resource*> Queue;
+  typedef base::concurrent_queue<Resource*> Queue;
 
-    ResourcesLoaderDelegate* m_delegate;
-    bool m_done;
-    bool m_cancel;
-    Queue m_queue;
-    std::unique_ptr<base::thread> m_thread;
-  };
+  std::unique_ptr<ResourcesLoaderDelegate> m_delegate;
+  bool m_done;
+  bool m_cancel;
+  Queue m_queue;
+  std::unique_ptr<std::thread> m_thread;
+};
 
 } // namespace app
 

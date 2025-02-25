@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2024  Igara Studio S.A.
 // Copyright (C) 2017-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
@@ -14,6 +14,7 @@
 #include "app/cmd/set_slice_key.h"
 #include "app/commands/command.h"
 #include "app/context_access.h"
+#include "app/i18n/strings.h"
 #include "app/modules/gui.h"
 #include "app/tx.h"
 #include "app/ui/status_bar.h"
@@ -21,7 +22,6 @@
 #include "doc/selected_objects.h"
 #include "doc/slice.h"
 #include "doc/sprite.h"
-#include "fmt/format.h"
 #include "ui/alert.h"
 #include "ui/widget.h"
 
@@ -41,8 +41,7 @@ private:
   ObjectId m_sliceId;
 };
 
-RemoveSliceCommand::RemoveSliceCommand()
-  : Command(CommandId::RemoveSlice(), CmdRecordableFlag)
+RemoveSliceCommand::RemoveSliceCommand() : Command(CommandId::RemoveSlice(), CmdRecordableFlag)
 {
 }
 
@@ -60,8 +59,7 @@ void RemoveSliceCommand::onLoadParams(const Params& params)
 bool RemoveSliceCommand::onEnabled(Context* context)
 {
   return context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
-                             ContextFlags::HasActiveSprite |
-                             ContextFlags::HasActiveLayer);
+                             ContextFlags::HasActiveSprite | ContextFlags::HasActiveLayer);
 }
 
 void RemoveSliceCommand::onExecute(Context* context)
@@ -93,14 +91,14 @@ void RemoveSliceCommand::onExecute(Context* context)
     Slice* slice = slicesToDelete.frontAs<Slice>();
     ASSERT(slice);
     if (slice)
-    sliceName = slice->name();
+      sliceName = slice->name();
   }
 
   {
     ContextWriter writer(reader);
     Doc* document(writer.document());
     Sprite* sprite(writer.sprite());
-    Tx tx(writer.context(), "Remove Slice");
+    Tx tx(writer, "Remove Slice");
 
     for (auto slice : slicesToDelete.iterateAs<Slice>()) {
       ASSERT(slice);
@@ -120,12 +118,13 @@ void RemoveSliceCommand::onExecute(Context* context)
   }
 
   StatusBar::instance()->invalidate();
-  if (!sliceName.empty())
-    StatusBar::instance()->showTip(
-      1000, fmt::format("Slice '{}' removed", sliceName));
-  else
-    StatusBar::instance()->showTip(
-      1000, fmt::format("{} slice(s) removed", slicesToDelete.size()));
+  if (!sliceName.empty()) {
+    StatusBar::instance()->showTip(1000, Strings::remove_slice_x_removed(sliceName));
+  }
+  else {
+    StatusBar::instance()->showTip(1000,
+                                   Strings::remove_slice_n_slices_removed(slicesToDelete.size()));
+  }
 }
 
 Command* CommandFactory::createRemoveSliceCommand()

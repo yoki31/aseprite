@@ -1,29 +1,26 @@
 // Aseprite
+// Copyright (C) 2020-2021  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
-#include "app/app.h"
 #include "app/color.h"
 #include "app/color_picker.h"
 #include "app/commands/cmd_eyedropper.h"
 #include "app/commands/commands.h"
 #include "app/commands/params.h"
-#include "app/modules/editors.h"
+#include "app/context.h"
 #include "app/pref/preferences.h"
 #include "app/site.h"
 #include "app/tools/tool.h"
 #include "app/tools/tool_box.h"
 #include "app/ui/color_bar.h"
 #include "app/ui/editor/editor.h"
-#include "app/ui_context.h"
-#include "doc/image.h"
-#include "doc/sprite.h"
 #include "ui/manager.h"
 #include "ui/system.h"
 
@@ -31,8 +28,7 @@ namespace app {
 
 using namespace ui;
 
-EyedropperCommand::EyedropperCommand()
-  : Command(CommandId::Eyedropper(), CmdUIOnlyFlag)
+EyedropperCommand::EyedropperCommand() : Command(CommandId::Eyedropper(), CmdUIOnlyFlag)
 {
   m_background = false;
 }
@@ -40,18 +36,15 @@ EyedropperCommand::EyedropperCommand()
 void EyedropperCommand::pickSample(const Site& site,
                                    const gfx::PointF& pixelPos,
                                    const render::Projection& proj,
-                                   app::Color& color)
+                                   app::Color& color,
+                                   doc::tile_t& tile)
 {
   // Check if we've to grab alpha channel or the merged color.
   Preferences& pref = Preferences::instance();
   ColorPicker::Mode mode = ColorPicker::FromComposition;
   switch (pref.eyedropper.sample()) {
-    case app::gen::EyedropperSample::ALL_LAYERS:
-      mode = ColorPicker::FromComposition;
-      break;
-    case app::gen::EyedropperSample::CURRENT_LAYER:
-      mode = ColorPicker::FromActiveLayer;
-      break;
+    case app::gen::EyedropperSample::ALL_LAYERS:    mode = ColorPicker::FromComposition; break;
+    case app::gen::EyedropperSample::CURRENT_LAYER: mode = ColorPicker::FromActiveLayer; break;
     case app::gen::EyedropperSample::FIRST_REFERENCE_LAYER:
       mode = ColorPicker::FromFirstReferenceLayer;
       break;
@@ -60,15 +53,16 @@ void EyedropperCommand::pickSample(const Site& site,
   ColorPicker picker;
   picker.pickColor(site, pixelPos, proj, mode);
 
-  app::gen::EyedropperChannel channel =
-    pref.eyedropper.channel();
+  app::gen::EyedropperChannel channel = pref.eyedropper.channel();
+
+  if (site.tilemapMode() == TilemapMode::Tiles) {
+    tile = picker.tile();
+    return;
+  }
 
   app::Color picked = picker.color();
-
   switch (channel) {
-    case app::gen::EyedropperChannel::COLOR_ALPHA:
-      color = picked;
-      break;
+    case app::gen::EyedropperChannel::COLOR_ALPHA: color = picked; break;
     case app::gen::EyedropperChannel::COLOR:
       if (picked.getAlpha() > 0)
         color = app::Color::fromRgb(picked.getRed(),
@@ -78,7 +72,6 @@ void EyedropperCommand::pickSample(const Site& site,
       break;
     case app::gen::EyedropperChannel::ALPHA:
       switch (color.getType()) {
-
         case app::Color::RgbType:
         case app::Color::IndexType:
           color = app::Color::fromRgb(color.getRed(),
@@ -102,10 +95,8 @@ void EyedropperCommand::pickSample(const Site& site,
           break;
 
         case app::Color::GrayType:
-          color = app::Color::fromGray(color.getGray(),
-                                       picked.getAlpha());
+          color = app::Color::fromGray(color.getGray(), picked.getAlpha());
           break;
-
       }
       break;
     case app::gen::EyedropperChannel::RGBA:
@@ -160,13 +151,11 @@ void EyedropperCommand::pickSample(const Site& site,
       if (picked.getType() == app::Color::GrayType)
         color = picked;
       else
-        color = app::Color::fromGray(picked.getGray(),
-                                     picked.getAlpha());
+        color = app::Color::fromGray(picked.getGray(), picked.getAlpha());
       break;
     case app::gen::EyedropperChannel::GRAY:
       if (picked.getAlpha() > 0)
-        color = app::Color::fromGray(picked.getGray(),
-                                     color.getAlpha());
+        color = app::Color::fromGray(picked.getGray(), color.getAlpha());
       break;
     case app::gen::EyedropperChannel::INDEX:
       color = app::Color::fromIndex(picked.getIndex());
@@ -177,19 +166,24 @@ void EyedropperCommand::pickSample(const Site& site,
 void EyedropperCommand::onLoadParams(const Params& params)
 {
   std::string target = params.get("target");
-  if (target == "foreground") m_background = false;
-  else if (target == "background") m_background = true;
+  if (target == "foreground")
+    m_background = false;
+  else if (target == "background")
+    m_background = true;
 }
 
 void EyedropperCommand::onExecute(Context* context)
 {
   gfx::Point mousePos = ui::get_mouse_position();
-  Widget* widget = ui::Manager::getDefault()->pick(mousePos);
+  Widget* widget = ui::Manager::getDefault()->pickFromScreenPos(mousePos);
   if (!widget || widget->type() != Editor::Type())
     return;
 
   Editor* editor = static_cast<Editor*>(widget);
-  executeOnMousePos(context, editor, mousePos, !m_background);
+  executeOnMousePos(context,
+                    editor,
+                    editor->display()->nativeWindow()->pointFromScreen(mousePos),
+                    !m_background);
 }
 
 void EyedropperCommand::executeOnMousePos(Context* context,
@@ -215,19 +209,24 @@ void EyedropperCommand::executeOnMousePos(Context* context,
   // Start with fg/bg color
   DisableColorBarEditMode disable;
   Preferences& pref = Preferences::instance();
-  app::Color color =
-    foreground ? pref.colorBar.fgColor():
-                 pref.colorBar.bgColor();
+  app::Color color = (foreground ? pref.colorBar.fgColor() : pref.colorBar.bgColor());
+  doc::tile_t tile = (foreground ? pref.colorBar.fgTile() : pref.colorBar.bgTile());
 
-  pickSample(editor->getSite(),
-             pixelPos,
-             editor->projection(),
-             color);
+  Site site = editor->getSite();
+  pickSample(site, pixelPos, editor->projection(), color, tile);
 
-  if (foreground)
-    pref.colorBar.fgColor(color);
-  else
-    pref.colorBar.bgColor(color);
+  if (site.tilemapMode() == TilemapMode::Tiles) {
+    if (foreground)
+      pref.colorBar.fgTile(tile);
+    else
+      pref.colorBar.bgTile(tile);
+  }
+  else {
+    if (foreground)
+      pref.colorBar.fgColor(color);
+    else
+      pref.colorBar.bgColor(color);
+  }
 }
 
 Command* CommandFactory::createEyedropperCommand()

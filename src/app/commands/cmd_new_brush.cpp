@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
@@ -15,7 +15,7 @@
 #include "app/commands/commands.h"
 #include "app/console.h"
 #include "app/context_access.h"
-#include "app/modules/editors.h"
+#include "app/i18n/strings.h"
 #include "app/tools/active_tool.h"
 #include "app/tools/ink.h"
 #include "app/tools/tool_box.h"
@@ -32,8 +32,8 @@
 
 namespace app {
 
-class NewBrushCommand : public Command
-                      , public SelectBoxDelegate {
+class NewBrushCommand : public Command,
+                        public SelectBoxDelegate {
 public:
   NewBrushCommand();
 
@@ -45,17 +45,14 @@ protected:
   void onQuickboxEnd(Editor* editor, const gfx::Rect& rect, ui::MouseButton button) override;
   void onQuickboxCancel(Editor* editor) override;
 
-  std::string onGetContextBarHelp() override {
-    return "Select brush bounds | Right-click to cut";
-  }
+  std::string onGetContextBarHelp() override { return Strings::new_brush_context_bar_help(); }
 
 private:
   void createBrush(const Site& site, const Mask* mask);
   void selectPencilTool();
 };
 
-NewBrushCommand::NewBrushCommand()
-  : Command(CommandId::NewBrush(), CmdUIOnlyFlag)
+NewBrushCommand::NewBrushCommand() : Command(CommandId::NewBrush(), CmdUIOnlyFlag)
 {
 }
 
@@ -66,37 +63,35 @@ bool NewBrushCommand::onEnabled(Context* context)
 
 void NewBrushCommand::onExecute(Context* context)
 {
-  ASSERT(current_editor);
-  if (!current_editor)
+  auto editor = Editor::activeEditor();
+  ASSERT(editor);
+  if (!editor)
     return;
 
   // If there is no visible mask, the brush must be selected from the
   // current editor.
   if (!context->activeDocument()->isMaskVisible()) {
-    EditorStatePtr state = current_editor->getState();
+    EditorStatePtr state = editor->getState();
     if (dynamic_cast<SelectBoxState*>(state.get())) {
       // If already are in "SelectBoxState" state, in this way we
       // avoid creating a stack of several "SelectBoxState" states.
       return;
     }
 
-    current_editor->setState(
-      EditorStatePtr(
-        new SelectBoxState(
-          this, current_editor->sprite()->bounds(),
-          SelectBoxState::Flags(
-            int(SelectBoxState::Flags::DarkOutside) |
-            int(SelectBoxState::Flags::QuickBox)))));
+    auto editor = Editor::activeEditor();
+    editor->setState(EditorStatePtr(
+      new SelectBoxState(this,
+                         editor->sprite()->bounds(),
+                         SelectBoxState::Flags(int(SelectBoxState::Flags::DarkOutside) |
+                                               int(SelectBoxState::Flags::QuickBox)))));
   }
   // Create a brush from the active selection
   else {
-    createBrush(context->activeSite(),
-                context->activeDocument()->mask());
+    createBrush(context->activeSite(), context->activeDocument()->mask());
     selectPencilTool();
 
     // Deselect mask
-    Command* cmd =
-      Commands::instance()->byId(CommandId::DeselectMask());
+    Command* cmd = Commands::instance()->byId(CommandId::DeselectMask());
     UIContext::instance()->executeCommand(cmd);
   }
 }
@@ -115,7 +110,7 @@ void NewBrushCommand::onQuickboxEnd(Editor* editor, const gfx::Rect& rect, ui::M
       if (writer.cel()) {
         gfx::Rect canvasRect = (rect & writer.cel()->bounds());
         if (!canvasRect.isEmpty()) {
-          Tx tx(writer.context(), "Clear");
+          Tx tx(writer, "Clear");
           tx(new cmd::ClearRect(writer.cel(), canvasRect));
           tx.commit();
         }
@@ -141,8 +136,8 @@ void NewBrushCommand::onQuickboxCancel(Editor* editor)
 
 void NewBrushCommand::createBrush(const Site& site, const Mask* mask)
 {
-  doc::ImageRef image(new_image_from_mask(site, mask,
-                                          Preferences::instance().experimental.newBlend()));
+  doc::ImageRef image(
+    new_image_from_mask(site, mask, Preferences::instance().experimental.newBlend()));
   if (!image)
     return;
 
@@ -161,19 +156,17 @@ void NewBrushCommand::createBrush(const Site& site, const Mask* mask)
       flags |= int(BrushSlot::Flags::ImageColor);
   }
 
-  int slot = App::instance()->brushes().addBrushSlot(
-    BrushSlot(BrushSlot::Flags(flags), brush));
+  int slot = App::instance()->brushes().addBrushSlot(BrushSlot(BrushSlot::Flags(flags), brush));
   ctxBar->setActiveBrush(brush);
 
   // Get the shortcut for this brush and show it to the user
   Params params;
   params.set("change", "custom");
   params.set("slot", base::convert_to<std::string>(slot).c_str());
-  KeyPtr key = KeyboardShortcuts::instance()->command(
-    CommandId::ChangeBrush(), params);
+  KeyPtr key = KeyboardShortcuts::instance()->command(CommandId::ChangeBrush(), params);
   if (key && !key->accels().empty()) {
     std::string tooltip;
-    tooltip += "Shortcut: ";
+    tooltip += Strings::new_brush_shortcut() + " ";
     tooltip += key->accels().front().toString();
     StatusBar::instance()->showTip(2000, tooltip);
   }

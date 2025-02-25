@@ -5,7 +5,7 @@
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "doc/algorithm/stroke_selection.h"
@@ -14,13 +14,13 @@
 #include "doc/algorithm/modify_selection.h"
 #include "doc/mask.h"
 
-namespace doc {
-namespace algorithm {
+namespace doc { namespace algorithm {
 
 void stroke_selection(Image* image,
-                      const gfx::Point& offset,
+                      const gfx::Rect& imageBounds,
                       const Mask* origMask,
-                      const color_t color)
+                      const color_t color,
+                      const Grid* grid)
 {
   ASSERT(origMask);
   ASSERT(origMask->bitmap());
@@ -34,18 +34,14 @@ void stroke_selection(Image* image,
   Mask mask;
   mask.reserve(bounds);
   mask.freeze();
-  modify_selection(
-    SelectionModifier::Border,
-    origMask, &mask, 1,
-    BrushType::kCircleBrushType);
+  modify_selection(SelectionModifier::Border, origMask, &mask, 1, BrushType::kCircleBrushType);
   mask.unfreeze();
 
   // Both mask must have the same bounds.
   ASSERT(mask.bounds() == origMask->bounds());
 
   if (mask.bitmap())
-    fill_selection(image, offset, &mask, color);
+    fill_selection(image, imageBounds, &mask, color, grid);
 }
 
-} // namespace algorithm
-} // namespace app
+}} // namespace doc::algorithm

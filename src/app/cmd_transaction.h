@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -18,51 +18,51 @@
 
 namespace app {
 
-  // Cmds created on each Transaction.
-  // The whole DocUndo contains a list of these CmdTransaction.
-  class CmdTransaction : public CmdSequence {
-  public:
-    CmdTransaction(const std::string& label,
-      bool changeSavedState, int* savedCounter);
+// Cmds created on each Transaction.
+// The whole DocUndo contains a list of these CmdTransaction.
+class CmdTransaction : public CmdSequence {
+public:
+  CmdTransaction(const std::string& label, bool changeSavedState);
 
-    // Moves the CmdTransaction internals to a new copy in case that
-    // we want to rollback this CmdTransaction and start again with
-    // the new CmdTransaction.
-    CmdTransaction* moveToEmptyCopy();
+  bool doesChangeSavedState() const { return m_changeSavedState; }
 
-    void setNewDocRange(const DocRange& range);
-    void updateSpritePositionAfter();
+  // Moves the CmdTransaction internals to a new copy in case that
+  // we want to rollback this CmdTransaction and start again with
+  // the new CmdTransaction.
+  CmdTransaction* moveToEmptyCopy();
 
-    SpritePosition spritePositionBeforeExecute() const { return m_spritePositionBefore; }
-    SpritePosition spritePositionAfterExecute() const { return m_spritePositionAfter; }
+  void setNewDocRange(const DocRange& range);
+  void updateSpritePositionAfter();
 
-    std::istream* documentRangeBeforeExecute() const;
-    std::istream* documentRangeAfterExecute() const;
+  SpritePosition spritePositionBeforeExecute() const { return m_spritePositionBefore; }
+  SpritePosition spritePositionAfterExecute() const { return m_spritePositionAfter; }
 
-  protected:
-    void onExecute() override;
-    void onUndo() override;
-    void onRedo() override;
-    std::string onLabel() const override;
-    size_t onMemSize() const override;
+  std::istream* documentRangeBeforeExecute() const;
+  std::istream* documentRangeAfterExecute() const;
 
-  private:
-    SpritePosition calcSpritePosition() const;
-    bool isDocRangeEnabled() const;
-    DocRange calcDocRange() const;
+protected:
+  void onExecute() override;
+  void onUndo() override;
+  void onRedo() override;
+  std::string onLabel() const override;
+  size_t onMemSize() const override;
 
-    struct Ranges {
-      std::stringstream m_before;
-      std::stringstream m_after;
-    };
+private:
+  SpritePosition calcSpritePosition() const;
+  bool isDocRangeEnabled() const;
+  DocRange calcDocRange() const;
 
-    SpritePosition m_spritePositionBefore;
-    SpritePosition m_spritePositionAfter;
-    std::unique_ptr<Ranges> m_ranges;
-    std::string m_label;
-    bool m_changeSavedState;
-    int* m_savedCounter;
+  struct Ranges {
+    std::stringstream m_before;
+    std::stringstream m_after;
   };
+
+  SpritePosition m_spritePositionBefore;
+  SpritePosition m_spritePositionAfter;
+  std::unique_ptr<Ranges> m_ranges;
+  std::string m_label;
+  bool m_changeSavedState;
+};
 
 } // namespace app
 

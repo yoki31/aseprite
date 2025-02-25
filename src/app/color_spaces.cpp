@@ -1,17 +1,16 @@
 // Aseprite
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/color_spaces.h"
 
 #include "app/doc.h"
-#include "app/modules/editors.h"
 #include "app/pref/preferences.h"
 #include "app/ui/editor/editor.h"
 #include "os/system.h"
@@ -27,10 +26,7 @@ static bool g_manage = false;
 void initialize_color_spaces(Preferences& pref)
 {
   g_manage = pref.color.manage();
-  pref.color.manage.AfterChange.connect(
-    [](bool manage){
-      g_manage = manage;
-    });
+  pref.color.manage.AfterChange.connect([](bool manage) { g_manage = manage; });
 }
 
 os::ColorSpaceRef get_screen_color_space()
@@ -40,11 +36,9 @@ os::ColorSpaceRef get_screen_color_space()
 
 os::ColorSpaceRef get_current_color_space()
 {
-#ifdef ENABLE_UI
-  if (current_editor)
-    return current_editor->document()->osColorSpace();
+  if (auto* editor = Editor::activeEditor())
+    return editor->document()->osColorSpace();
   else
-#endif
     return get_screen_color_space();
 }
 
@@ -78,16 +72,14 @@ ConvertCS::ConvertCS()
   }
 }
 
-ConvertCS::ConvertCS(const os::ColorSpaceRef& srcCS,
-                     const os::ColorSpaceRef& dstCS)
+ConvertCS::ConvertCS(const os::ColorSpaceRef& srcCS, const os::ColorSpaceRef& dstCS)
 {
   if (g_manage) {
     m_conversion = os::instance()->convertBetweenColorSpace(srcCS, dstCS);
   }
 }
 
-ConvertCS::ConvertCS(ConvertCS&& that)
-  : m_conversion(std::move(that.m_conversion))
+ConvertCS::ConvertCS(ConvertCS&& that) : m_conversion(std::move(that.m_conversion))
 {
 }
 
@@ -110,8 +102,7 @@ ConvertCS convert_from_current_to_screen_color_space()
 
 ConvertCS convert_from_custom_to_srgb(const os::ColorSpaceRef& from)
 {
-  return ConvertCS(from,
-                   os::instance()->makeColorSpace(gfx::ColorSpace::MakeSRGB()));
+  return ConvertCS(from, os::instance()->makeColorSpace(gfx::ColorSpace::MakeSRGB()));
 }
 
 } // namespace app

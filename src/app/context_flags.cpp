@@ -1,19 +1,18 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/context_flags.h"
 
 #include "app/context.h"
 #include "app/doc.h"
-#include "app/modules/editors.h"
 #include "app/site.h"
 #include "app/ui/editor/editor.h"
 #include "doc/cel.h"
@@ -37,7 +36,8 @@ void ContextFlags::update(Context* context)
   if (document) {
     m_flags |= HasActiveDocument;
 
-    if (document->readLock(0)) {
+    Doc::LockResult res = document->readLock(0);
+    if (res != Doc::LockResult::Fail) {
       m_flags |= ActiveDocumentIsReadable;
 
       if (document->isMaskVisible())
@@ -45,27 +45,21 @@ void ContextFlags::update(Context* context)
 
       updateFlagsFromSite(site);
 
-      if (document->canWriteLockFromRead())
+      if (document->canWriteLockFromRead() && !document->isReadOnly())
         m_flags |= ActiveDocumentIsWritable;
 
-      document->unlock();
+      document->unlock(res);
     }
 
-#ifdef ENABLE_UI
     // TODO this is a hack, try to find a better design to handle this
     // "moving pixels" state.
-    if (current_editor &&
-        current_editor->document() == document &&
-        current_editor->isMovingPixels()) {
+    auto editor = Editor::activeEditor();
+    if (editor && editor->document() == document && editor->isMovingPixels()) {
       // Flags enabled when we are in MovingPixelsState
-      m_flags |=
-        HasVisibleMask |
-        ActiveDocumentIsReadable |
-        ActiveDocumentIsWritable;
+      m_flags |= HasVisibleMask | ActiveDocumentIsReadable | ActiveDocumentIsWritable;
 
-      updateFlagsFromSite(current_editor->getSite());
+      updateFlagsFromSite(editor->getSite());
     }
-#endif // ENABLE_UI
   }
 }
 
@@ -99,6 +93,9 @@ void ContextFlags::updateFlagsFromSite(const Site& site)
   if (layer->isReference())
     m_flags |= ActiveLayerIsReference;
 
+  if (layer->isTilemap())
+    m_flags |= ActiveLayerIsTilemap;
+
   if (layer->isImage()) {
     m_flags |= ActiveLayerIsImage;
 
@@ -113,6 +110,9 @@ void ContextFlags::updateFlagsFromSite(const Site& site)
 
   if (site.selectedColors().picks() > 0)
     m_flags |= HasSelectedColors;
+
+  if (site.selectedTiles().picks() > 0)
+    m_flags |= HasSelectedTiles;
 }
 
 } // namespace app

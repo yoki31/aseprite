@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A
+// Copyright (C) 2020-2022  Igara Studio S.A
 // Copyright (C) 2001-2015  David Capello
 //
 // This program is distributed under the terms of
@@ -14,15 +14,16 @@
 
 namespace app {
 
-  class MainMenuBar : public ui::MenuBar {
-  public:
-    MainMenuBar();
+class MainMenuBar : public ui::MenuBar {
+public:
+  MainMenuBar();
 
-    void reload();
+  void reload();
 
-  private:
-    obs::scoped_connection m_extScripts;
-  };
+private:
+  obs::scoped_connection m_extKeys;
+  obs::scoped_connection m_extScripts;
+};
 
 } // namespace app
 

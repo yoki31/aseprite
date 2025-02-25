@@ -1,4 +1,5 @@
 // Aseprite Render Library
+// Copyright (c) 2022 Igara Studio S.A.
 // Copyright (c) 2018 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -10,11 +11,11 @@
 
 namespace render {
 
-  enum class BgType {
-    NONE,
-    TRANSPARENT,
-    CHECKED,
-  };
+enum class BgType {
+  NONE,
+  TRANSPARENT,
+  CHECKERED,
+};
 
 } // namespace render
 

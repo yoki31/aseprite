@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -23,18 +23,25 @@ namespace app {
 template<typename Base>
 class DraggableWidget : public Base {
 public:
-  template<typename...Args>
-  DraggableWidget(Args...args) : Base(args...) { }
+  template<typename... Args>
+  DraggableWidget(Args... args) : Base(args...)
+  {
+  }
 
-  bool onProcessMessage(ui::Message* msg) override {
+  ~DraggableWidget()
+  {
+    if (m_floatingOverlay)
+      destroyFloatingOverlay();
+  }
+
+  bool onProcessMessage(ui::Message* msg) override
+  {
     switch (msg->type()) {
-
       case ui::kSetCursorMessage:
         if (m_floatingOverlay) {
           const ui::MouseMessage* mouseMsg = static_cast<ui::MouseMessage*>(msg);
           const gfx::Point mousePos = mouseMsg->position();
-          if (onCanDropItemsOutside() &&
-              !getParentBounds().contains(mousePos)) {
+          if (onCanDropItemsOutside() && !getParentBounds().contains(mousePos)) {
             ui::set_mouse_cursor(ui::kForbiddenCursor);
           }
           else {
@@ -115,22 +122,17 @@ public:
         m_wasDragged = false;
         return result;
       }
-
     }
     return Base::onProcessMessage(msg);
   }
 
-  bool wasDragged() const {
-    return m_wasDragged;
-  }
+  bool wasDragged() const { return m_wasDragged; }
 
-  bool isDragging() const {
-    return m_isDragging;
-  }
+  bool isDragging() const { return m_isDragging; }
 
 private:
-
-  void createFloatingOverlay() {
+  void createFloatingOverlay()
+  {
     ASSERT(!m_floatingOverlay);
 
     m_isDragging = true;
@@ -147,25 +149,31 @@ private:
       paint.style(os::Paint::Fill);
       surface->drawRect(gfx::Rect(0, 0, surface->width(), surface->height()), paint);
     }
+
+    ui::Display* display = this->Base::display();
     {
-      ui::Graphics g(surface, 0, 0);
+      ui::Graphics g(display, surface, 0, 0);
       g.setFont(AddRef(this->font()));
       drawFloatingOverlay(g);
     }
 
     m_floatingOverlay = base::make_ref<ui::Overlay>(
-      surface, gfx::Point(),
-      (ui::Overlay::ZOrder)(ui::Overlay::MouseZOrder-1));
+      display,
+      surface,
+      gfx::Point(),
+      (ui::Overlay::ZOrder)(ui::Overlay::MouseZOrder - 1));
     ui::OverlayManager::instance()->addOverlay(m_floatingOverlay);
   }
 
-  void destroyFloatingOverlay() {
+  void destroyFloatingOverlay()
+  {
     ui::OverlayManager::instance()->removeOverlay(m_floatingOverlay);
     m_floatingOverlay.reset();
     m_isDragging = false;
   }
 
-  gfx::Size getFloatingOverlaySize() {
+  gfx::Size getFloatingOverlaySize()
+  {
     auto view = ui::View::getView(this->parent());
     if (view)
       return (view->viewportBounds().offset(view->viewScroll()) & this->bounds()).size();
@@ -173,7 +181,8 @@ private:
       return this->size();
   }
 
-  gfx::Rect getParentBounds() {
+  gfx::Rect getParentBounds()
+  {
     auto view = ui::View::getView(this->parent());
     if (view)
       return view->viewportBounds();
@@ -181,21 +190,23 @@ private:
       return this->parent()->bounds();
   }
 
-  void layoutParent() {
+  void layoutParent()
+  {
     this->parent()->layout();
     auto view = ui::View::getView(this->parent());
     if (view)
       return view->updateView();
   }
 
-  void drawFloatingOverlay(ui::Graphics& g) {
+  void drawFloatingOverlay(ui::Graphics& g)
+  {
     ui::PaintEvent ev(this, &g);
     this->onPaint(ev);
   }
 
   virtual bool onCanDropItemsOutside() { return true; }
-  virtual void onReorderWidgets(const gfx::Point& mousePos, bool inside) { }
-  virtual void onFinalDrop(bool inside) { }
+  virtual void onReorderWidgets(const gfx::Point& mousePos, bool inside) {}
+  virtual void onFinalDrop(bool inside) {}
 
   // True if we should create the floating overlay after leaving the
   // widget bounds.

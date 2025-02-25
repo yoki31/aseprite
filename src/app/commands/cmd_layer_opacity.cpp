@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2024  Igara Studio S.A.
 // Copyright (C) 2016-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
@@ -19,9 +19,7 @@
 #include "app/modules/gui.h"
 #include "app/tx.h"
 #include "app/ui/timeline/timeline.h"
-#include "base/clamp.h"
 #include "doc/layer.h"
-#include "fmt/format.h"
 
 #include <string>
 
@@ -42,8 +40,7 @@ private:
   int m_opacity;
 };
 
-LayerOpacityCommand::LayerOpacityCommand()
-  : Command(CommandId::LayerOpacity(), CmdUIOnlyFlag)
+LayerOpacityCommand::LayerOpacityCommand() : Command(CommandId::LayerOpacity(), CmdUIOnlyFlag)
 {
   m_opacity = 255;
 }
@@ -51,26 +48,23 @@ LayerOpacityCommand::LayerOpacityCommand()
 void LayerOpacityCommand::onLoadParams(const Params& params)
 {
   m_opacity = params.get_as<int>("opacity");
-  m_opacity = base::clamp(m_opacity, 0, 255);
+  m_opacity = std::clamp(m_opacity, 0, 255);
 }
 
 bool LayerOpacityCommand::onEnabled(Context* context)
 {
-  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable |
-                             ContextFlags::HasActiveLayer);
+  return context->checkFlags(ContextFlags::ActiveDocumentIsWritable | ContextFlags::HasActiveLayer);
 }
 
 void LayerOpacityCommand::onExecute(Context* context)
 {
   ContextWriter writer(context);
   Layer* layer = writer.layer();
-  if (!layer ||
-      !layer->isImage() ||
-      static_cast<LayerImage*>(layer)->opacity() == m_opacity)
+  if (!layer || !layer->isImage() || static_cast<LayerImage*>(layer)->opacity() == m_opacity)
     return;
 
   {
-    Tx tx(writer.context(), "Set Layer Opacity");
+    Tx tx(writer, "Set Layer Opacity");
 
     // TODO the range of selected frames should be in app::Site.
     SelectedLayers selLayers;
@@ -95,9 +89,7 @@ void LayerOpacityCommand::onExecute(Context* context)
 
 std::string LayerOpacityCommand::onGetFriendlyName() const
 {
-  return fmt::format(getBaseFriendlyName(),
-                     m_opacity,
-                     int(100.0 * m_opacity / 255.0));
+  return Strings::commands_LayerOpacity(m_opacity, int(100.0 * m_opacity / 255.0));
 }
 
 Command* CommandFactory::createLayerOpacityCommand()

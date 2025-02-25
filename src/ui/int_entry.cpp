@@ -1,21 +1,21 @@
 // Aseprite UI Library
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "ui/int_entry.h"
 
-#include "base/clamp.h"
 #include "base/scoped_value.h"
 #include "gfx/rect.h"
 #include "gfx/region.h"
 #include "os/font.h"
+#include "ui/fit_bounds.h"
 #include "ui/manager.h"
 #include "ui/message.h"
 #include "ui/popup_window.h"
@@ -33,16 +33,16 @@ namespace ui {
 using namespace gfx;
 
 IntEntry::IntEntry(int min, int max, SliderDelegate* sliderDelegate)
-  : Entry(int(std::floor(std::log10(double(max))))+1, "")
+  : Entry(int(std::floor(std::log10(double(max)))) + 1, "")
   , m_min(min)
   , m_max(max)
-  , m_slider(m_min, m_max, m_min, sliderDelegate)
   , m_popupWindow(nullptr)
   , m_changeFromSlider(false)
 {
-  m_slider.setFocusStop(false); // In this way the IntEntry doesn't lost the focus
-  m_slider.setTransparent(true);
-  m_slider.Change.connect(&IntEntry::onChangeSlider, this);
+  m_slider = std::make_unique<Slider>(m_min, m_max, m_min, sliderDelegate);
+  m_slider->setFocusStop(false); // In this way the IntEntry doesn't lost the focus
+  m_slider->setTransparent(true);
+  m_slider->Change.connect(&IntEntry::onChangeSlider, this);
   initTheme();
 }
 
@@ -53,18 +53,18 @@ IntEntry::~IntEntry()
 
 int IntEntry::getValue() const
 {
-  int value = m_slider.convertTextToValue(text());
-  return base::clamp(value, m_min, m_max);
+  int value = m_slider->convertTextToValue(text());
+  return std::clamp(value, m_min, m_max);
 }
 
 void IntEntry::setValue(int value)
 {
-  value = base::clamp(value, m_min, m_max);
+  value = std::clamp(value, m_min, m_max);
 
-  setText(m_slider.convertValueToText(value));
+  setText(m_slider->convertValueToText(value));
 
   if (m_popupWindow && !m_changeFromSlider)
-    m_slider.setValue(value);
+    m_slider->setValue(value);
 
   onValueChange();
 }
@@ -72,10 +72,9 @@ void IntEntry::setValue(int value)
 bool IntEntry::onProcessMessage(Message* msg)
 {
   switch (msg->type()) {
-
     // Reset value if it's out of bounds when focus is lost
     case kFocusLeaveMessage:
-      setValue(base::clamp(getValue(), m_min, m_max));
+      setValue(std::clamp(getValue(), m_min, m_max));
       deselectText();
       break;
 
@@ -90,16 +89,17 @@ bool IntEntry::onProcessMessage(Message* msg)
     case kMouseMoveMessage:
       if (hasCapture()) {
         MouseMessage* mouseMsg = static_cast<MouseMessage*>(msg);
-        Widget* pick = manager()->pick(mouseMsg->position());
-        if (pick == &m_slider) {
+        Widget* pick = manager()->pickFromScreenPos(
+          display()->nativeWindow()->pointToScreen(mouseMsg->position()));
+        if (pick == m_slider.get()) {
           releaseMouse();
 
           MouseMessage mouseMsg2(kMouseDownMessage,
-                                 mouseMsg->pointerType(),
-                                 mouseMsg->button(),
-                                 mouseMsg->modifiers(),
-                                 mouseMsg->position());
-          m_slider.sendMessage(&mouseMsg2);
+                                 *mouseMsg,
+                                 mouseMsg->positionForDisplay(pick->display()));
+          mouseMsg2.setRecipient(pick);
+          mouseMsg2.setDisplay(pick->display());
+          pick->sendMessage(&mouseMsg2);
         }
       }
       break;
@@ -107,10 +107,9 @@ bool IntEntry::onProcessMessage(Message* msg)
     case kMouseWheelMessage:
       if (isEnabled()) {
         int oldValue = getValue();
-        int newValue = oldValue
-          + static_cast<MouseMessage*>(msg)->wheelDelta().x
-          - static_cast<MouseMessage*>(msg)->wheelDelta().y;
-        newValue = base::clamp(newValue, m_min, m_max);
+        int newValue = oldValue + static_cast<MouseMessage*>(msg)->wheelDelta().x -
+                       static_cast<MouseMessage*>(msg)->wheelDelta().y;
+        newValue = std::clamp(newValue, m_min, m_max);
         if (newValue != oldValue) {
           setValue(newValue);
           selectAllText();
@@ -139,7 +138,7 @@ bool IntEntry::onProcessMessage(Message* msg)
 void IntEntry::onInitTheme(InitThemeEvent& ev)
 {
   Entry::onInitTheme(ev);
-  m_slider.initTheme();       // The slider might not be in the popup window
+  m_slider->initTheme(); // The slider might not be in the popup window
   if (m_popupWindow)
     m_popupWindow->initTheme();
 }
@@ -147,10 +146,10 @@ void IntEntry::onInitTheme(InitThemeEvent& ev)
 void IntEntry::onSizeHint(SizeHintEvent& ev)
 {
   int trailing = font()->textLength(getSuffix());
-  trailing = std::max(trailing, 2*theme()->getEntryCaretSize(this).w);
+  trailing = std::max(trailing, 2 * theme()->getEntryCaretSize(this).w);
 
-  int min_w = font()->textLength(m_slider.convertValueToText(m_min));
-  int max_w = font()->textLength(m_slider.convertValueToText(m_max)) + trailing;
+  int min_w = font()->textLength(m_slider->convertValueToText(m_min));
+  int max_w = font()->textLength(m_slider->convertValueToText(m_max)) + trailing;
 
   int w = std::max(min_w, max_w);
   int h = textHeight();
@@ -174,26 +173,42 @@ void IntEntry::onValueChange()
 
 void IntEntry::openPopup()
 {
-  m_slider.setValue(getValue());
+  m_slider->setValue(getValue());
 
-  m_popupWindow = new TransparentPopupWindow(PopupWindow::ClickBehavior::CloseOnClickInOtherWindow);
+  // We weren't able to reproduce it, but there are crash reports
+  // where this openPopup() function is called and the popup is still
+  // alive, with the slider inside (we have to remove it before
+  // resetting m_popupWindow pointer to avoid deleting the slider
+  // pointer).
+  removeSlider();
+
+  m_popupWindow = std::make_unique<TransparentPopupWindow>(
+    PopupWindow::ClickBehavior::CloseOnClickInOtherWindow);
   m_popupWindow->setAutoRemap(false);
-  m_popupWindow->addChild(&m_slider);
+  m_popupWindow->addChild(m_slider.get());
   m_popupWindow->Close.connect(&IntEntry::onPopupClose, this);
 
-  Rect rc = bounds();
-  gfx::Size sz = m_popupWindow->sizeHint();
-  rc.w = 128*guiscale();
-  if (rc.x+rc.w > ui::display_w())
-    rc.x = rc.x-rc.w+bounds().w;
-  if (rc.y+rc.h+sz.h < ui::display_h())
-    rc.y += rc.h;
-  else
-    rc.y -= sz.h;
-  m_popupWindow->setBounds(rc);
+  fit_bounds(display(),
+             m_popupWindow.get(),
+             gfx::Rect(0, 0, 128 * guiscale(), m_popupWindow->sizeHint().h),
+             [this](const gfx::Rect& workarea,
+                    gfx::Rect& rc,
+                    std::function<gfx::Rect(Widget*)> getWidgetBounds) {
+               Rect entryBounds = getWidgetBounds(this);
 
-  Region rgn(rc.createUnion(bounds()));
-  rgn.createUnion(rgn, Region(bounds()));
+               rc.x = entryBounds.x;
+               rc.y = entryBounds.y2();
+
+               if (rc.x2() > workarea.x2())
+                 rc.x = rc.x - rc.w + entryBounds.w;
+
+               if (rc.y2() > workarea.y2())
+                 rc.y = entryBounds.y - entryBounds.h;
+
+               m_popupWindow->setBounds(rc);
+             });
+
+  Region rgn(m_popupWindow->boundsOnScreen().createUnion(boundsOnScreen()));
   m_popupWindow->setHotRegion(rgn);
 
   m_popupWindow->openWindow();
@@ -205,15 +220,14 @@ void IntEntry::closePopup()
     removeSlider();
 
     m_popupWindow->closeWindow(nullptr);
-    delete m_popupWindow;
-    m_popupWindow = nullptr;
+    m_popupWindow.reset();
   }
 }
 
 void IntEntry::onChangeSlider()
 {
-  base::ScopedValue<bool> lockFlag(m_changeFromSlider, true, false);
-  setValue(m_slider.getValue());
+  base::ScopedValue lockFlag(m_changeFromSlider, true);
+  setValue(m_slider->getValue());
   selectAllText();
 }
 
@@ -227,9 +241,8 @@ void IntEntry::onPopupClose(CloseEvent& ev)
 
 void IntEntry::removeSlider()
 {
-  if (m_popupWindow &&
-      m_slider.parent() == m_popupWindow) {
-    m_popupWindow->removeChild(&m_slider);
+  if (m_popupWindow && m_slider->parent() == m_popupWindow.get()) {
+    m_popupWindow->removeChild(m_slider.get());
   }
 }
 

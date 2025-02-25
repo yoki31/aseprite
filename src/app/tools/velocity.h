@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020  Igara Studio S.A.
+// Copyright (C) 2020-2021  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -13,8 +13,7 @@
 #include "base/vector2d.h"
 #include "gfx/point.h"
 
-namespace app {
-namespace tools {
+namespace app { namespace tools {
 
 // Mouse velocity sensor
 class VelocitySensor {
@@ -34,7 +33,7 @@ public:
 
   const Vec2& velocity() const { return m_velocity; }
 
-  void updateWithScreenPoint(const gfx::Point& screenPoint);
+  void updateWithDisplayPoint(const gfx::Point& screenPoint);
 
 private:
   bool m_firstPoint;
@@ -43,7 +42,6 @@ private:
   base::tick_t m_lastUpdate;
 };
 
-} // namespace tools
-} // namespace app
+}} // namespace app::tools
 
 #endif

@@ -1,18 +1,16 @@
 // Aseprite UI Library
-// Copyright (C) 2018-2021  Igara Studio S.A.
+// Copyright (C) 2018-2022  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "ui/overlay_manager.h"
 
-#include "os/surface.h"
-#include "os/window.h"
 #include "ui/manager.h"
 #include "ui/overlay.h"
 
@@ -20,7 +18,8 @@
 
 namespace ui {
 
-static bool zorder_less_than(const OverlayRef& a, const OverlayRef& b) {
+static bool zorder_less_than(const OverlayRef& a, const OverlayRef& b)
+{
   return *a < *b;
 }
 
@@ -68,11 +67,6 @@ void OverlayManager::restoreOverlappedAreas(const gfx::Rect& restoreBounds)
   if (m_overlays.empty())
     return;
 
-  // TODO can we remove this?
-  Manager* manager = Manager::getDefault();
-  if (!manager)
-    return;
-
   for (auto& overlay : *this)
     overlay->restoreOverlappedArea(restoreBounds);
 }
@@ -82,15 +76,8 @@ void OverlayManager::drawOverlays()
   if (m_overlays.empty())
     return;
 
-  Manager* manager = Manager::getDefault();
-  if (!manager)
-    return;
-
-  os::Surface* displaySurface = manager->display()->surface();
-  os::SurfaceLock lock(displaySurface);
-
   for (auto& overlay : *this)
-    overlay->captureOverlappedArea(displaySurface);
+    overlay->captureOverlappedArea();
 
   for (auto& overlay : *this)
     overlay->drawOverlay();

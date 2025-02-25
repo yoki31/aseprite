@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2018-2020  Igara Studio S.A.
+// Copyright (C) 2018-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
@@ -18,16 +18,12 @@
 #include "app/console.h"
 #include "app/doc.h"
 #include "app/i18n/strings.h"
-#include "app/modules/editors.h"
 #include "app/modules/palettes.h"
 #include "app/pref/preferences.h"
-#include "app/ui/button_set.h"
 #include "app/ui/workspace.h"
 #include "app/ui_context.h"
 #include "app/util/clipboard.h"
-#include "app/util/clipboard.h"
 #include "app/util/pixel_ratio.h"
-#include "base/clamp.h"
 #include "doc/cel.h"
 #include "doc/image.h"
 #include "doc/layer.h"
@@ -45,11 +41,11 @@ using namespace ui;
 namespace app {
 
 struct NewFileParams : public NewParams {
-  Param<bool> ui { this, true, "ui" };
-  Param<int> width { this, 0, "width" };
-  Param<int> height { this, 0, "height" };
-  Param<ColorMode> colorMode { this, ColorMode::RGB, "colorMode" };
-  Param<bool> fromClipboard { this, false, "fromClipboard" };
+  Param<bool> ui{ this, true, "ui" };
+  Param<int> width{ this, 0, "width" };
+  Param<int> height{ this, 0, "height" };
+  Param<ColorMode> colorMode{ this, ColorMode::RGB, "colorMode" };
+  Param<bool> fromClipboard{ this, false, "fromClipboard" };
 };
 
 class NewFileCommand : public CommandWithNewParams<NewFileParams> {
@@ -67,19 +63,13 @@ protected:
 // static
 int NewFileCommand::g_spriteCounter = 0;
 
-NewFileCommand::NewFileCommand()
-  : CommandWithNewParams(CommandId::NewFile(), CmdRecordableFlag)
+NewFileCommand::NewFileCommand() : CommandWithNewParams(CommandId::NewFile(), CmdRecordableFlag)
 {
 }
 
-bool NewFileCommand::onEnabled(Context* context)
+bool NewFileCommand::onEnabled(Context* ctx)
 {
-  return
-    (!params().fromClipboard()
-#ifdef ENABLE_UI
-     || (clipboard::get_current_format() == clipboard::ClipboardImage)
-#endif
-     );
+  return (!params().fromClipboard() || (ctx->clipboard()->format() == ClipboardFormat::Image));
 }
 
 void NewFileCommand::onExecute(Context* ctx)
@@ -89,15 +79,12 @@ void NewFileCommand::onExecute(Context* ctx)
   doc::ColorMode colorMode = params().colorMode();
   app::Color bgColor = app::Color::fromMask();
   doc::PixelRatio pixelRatio(1, 1);
-#ifdef ENABLE_UI
   doc::ImageRef clipboardImage;
   doc::Palette clipboardPalette(0, 256);
-#endif
   const int ncolors = get_default_palette()->size();
 
-#ifdef ENABLE_UI
   if (params().fromClipboard()) {
-    clipboardImage = clipboard::get_image(&clipboardPalette);
+    clipboardImage = ctx->clipboard()->getImage(&clipboardPalette);
     if (!clipboardImage)
       return;
 
@@ -118,8 +105,7 @@ void NewFileCommand::onExecute(Context* ctx)
     if (!params().colorMode.isSet()) {
       colorMode = pref.newFile.colorMode();
       // Invalid format in config file.
-      if (colorMode != ColorMode::RGB &&
-          colorMode != ColorMode::INDEXED &&
+      if (colorMode != ColorMode::RGB && colorMode != ColorMode::INDEXED &&
           colorMode != ColorMode::GRAYSCALE) {
         colorMode = ColorMode::INDEXED;
       }
@@ -128,18 +114,20 @@ void NewFileCommand::onExecute(Context* ctx)
     int w = pref.newFile.width();
     int h = pref.newFile.height();
     int bg = pref.newFile.backgroundColor();
-    bg = base::clamp(bg, 0, 2);
+    bg = std::clamp(bg, 0, 2);
 
     // If the clipboard contains an image, we can show the size of the
     // clipboard as default image size.
     gfx::Size clipboardSize;
-    if (clipboard::get_image_size(clipboardSize)) {
+    if (ctx->clipboard()->getImageSize(clipboardSize)) {
       w = clipboardSize.w;
       h = clipboardSize.h;
     }
 
-    if (params().width.isSet()) w = width;
-    if (params().height.isSet()) h = height;
+    if (params().width.isSet())
+      w = width;
+    if (params().height.isSet())
+      h = height;
 
     window.width()->setTextf("%d", std::max(1, w));
     window.height()->setTextf("%d", std::max(1, h));
@@ -153,16 +141,10 @@ void NewFileCommand::onExecute(Context* ctx)
     // Advance options
     bool advanced = pref.newFile.advanced();
     window.advancedCheck()->setSelected(advanced);
-    window.advancedCheck()->Click.connect(
-      [&]{
-        gfx::Rect bounds = window.bounds();
-        window.advanced()->setVisible(window.advancedCheck()->isSelected());
-        window.setBounds(gfx::Rect(window.bounds().origin(),
-                                   window.sizeHint()));
-        window.layout();
-
-        window.manager()->invalidateRect(bounds);
-      });
+    window.advancedCheck()->Click.connect([&] {
+      window.advanced()->setVisible(window.advancedCheck()->isSelected());
+      window.expandWindow(window.sizeHint());
+    });
     window.advanced()->setVisible(advanced);
     if (advanced)
       window.pixelRatio()->setValue(pref.newFile.pixelRatio());
@@ -183,17 +165,16 @@ void NewFileCommand::onExecute(Context* ctx)
     h = window.height()->textInt();
     bg = window.bgColor()->selectedItem();
     if (window.advancedCheck()->isSelected()) {
-      pixelRatio = base::convert_to<PixelRatio>(
-        window.pixelRatio()->getValue());
+      pixelRatio = base::convert_to<PixelRatio>(window.pixelRatio()->getValue());
     }
 
     static_assert(int(ColorMode::RGB) == 0, "RGB pixel format should be 0");
     static_assert(int(ColorMode::INDEXED) == 2, "Indexed pixel format should be 2");
 
-    colorMode = base::clamp(colorMode, ColorMode::RGB, ColorMode::INDEXED);
-    w = base::clamp(w, 1, DOC_SPRITE_MAX_WIDTH);
-    h = base::clamp(h, 1, DOC_SPRITE_MAX_HEIGHT);
-    bg = base::clamp(bg, 0, 2);
+    colorMode = std::clamp(colorMode, ColorMode::RGB, ColorMode::INDEXED);
+    w = std::clamp(w, 1, DOC_SPRITE_MAX_WIDTH);
+    h = std::clamp(h, 1, DOC_SPRITE_MAX_HEIGHT);
+    bg = std::clamp(bg, 0, 2);
 
     // Select the background color
     if (bg >= 0 && bg <= 3) {
@@ -214,19 +195,16 @@ void NewFileCommand::onExecute(Context* ctx)
     width = w;
     height = h;
   }
-#endif // ENABLE_UI
 
-  ASSERT(colorMode == ColorMode::RGB ||
-         colorMode == ColorMode::GRAYSCALE ||
+  ASSERT(colorMode == ColorMode::RGB || colorMode == ColorMode::GRAYSCALE ||
          colorMode == ColorMode::INDEXED);
   if (width < 1 || height < 1)
     return;
 
   // Create the new sprite
-  std::unique_ptr<Sprite> sprite(
-    Sprite::MakeStdSprite(
-      ImageSpec(colorMode, width, height, 0,
-                get_working_rgb_space_from_preferences()), ncolors));
+  std::unique_ptr<Sprite> sprite(Sprite::MakeStdSprite(
+    ImageSpec(colorMode, width, height, 0, get_working_rgb_space_from_preferences()),
+    ncolors));
 
   sprite->setPixelRatio(pixelRatio);
 
@@ -247,18 +225,14 @@ void NewFileCommand::onExecute(Context* ctx)
       Palette oldPal = *get_current_palette();
       set_current_palette(get_default_palette(), false);
 
-      doc::clear_image(
-        image,
-        color_utils::color_for_target(
-          bgColor,
-          ColorTarget(
-            ColorTarget::BackgroundLayer,
-            sprite->pixelFormat(),
-            sprite->transparentColor())));
+      doc::clear_image(image,
+                       color_utils::color_for_target(bgColor,
+                                                     ColorTarget(ColorTarget::BackgroundLayer,
+                                                                 sprite->pixelFormat(),
+                                                                 sprite->transparentColor())));
 
       set_current_palette(&oldPal, false);
     }
-#ifdef ENABLE_UI
     else if (clipboardImage) {
       LayerImage* layerImage = static_cast<LayerImage*>(layer);
       // layerImage->configureAsBackground();
@@ -267,25 +241,34 @@ void NewFileCommand::onExecute(Context* ctx)
       image->copy(clipboardImage.get(), gfx::Clip(clipboardImage->bounds()));
 
       if (clipboardPalette.isBlack()) {
-        render::create_palette_from_sprite(
-          sprite.get(), 0, sprite->lastFrame(), true,
-          &clipboardPalette, nullptr, true);
+        render::create_palette_from_sprite(sprite.get(),
+                                           0,
+                                           sprite->lastFrame(),
+                                           true,
+                                           &clipboardPalette,
+                                           nullptr,
+                                           true,
+                                           Preferences::instance().quantization.rgbmapAlgorithm());
       }
       sprite->setPalette(&clipboardPalette, false);
     }
-#endif // ENABLE_UI
 
     if (layer->isBackground())
       layer->setName(Strings::commands_NewFile_BackgroundLayer());
     else
       layer->setName(fmt::format("{} {}", Strings::commands_NewLayer_Layer(), 1));
   }
+  if (sprite->pixelFormat() == IMAGE_INDEXED) {
+    sprite->rgbMap(0,
+                   Sprite::RgbMapFor(!layer->isBackground()),
+                   Preferences::instance().quantization.rgbmapAlgorithm(),
+                   Preferences::instance().quantization.fitCriteria());
+  }
 
   // Show the sprite to the user
   std::unique_ptr<Doc> doc(new Doc(sprite.get()));
   sprite.release();
-  doc->setFilename(fmt::format("{}-{:04d}",
-                               Strings::commands_NewFile_Sprite(), ++g_spriteCounter));
+  doc->setFilename(fmt::format("{}-{:04d}", Strings::commands_NewFile_Sprite(), ++g_spriteCounter));
   doc->setContext(ctx);
   doc.release();
 }
@@ -293,9 +276,9 @@ void NewFileCommand::onExecute(Context* ctx)
 std::string NewFileCommand::onGetFriendlyName() const
 {
   if (params().fromClipboard())
-    return fmt::format(Strings::commands_NewFile_FromClipboard());
+    return Strings::commands_NewFile_FromClipboard();
   else
-    return fmt::format(Strings::commands_NewFile());
+    return Strings::commands_NewFile();
 }
 
 Command* CommandFactory::createNewFileCommand()

@@ -1,11 +1,12 @@
 // Aseprite Document Library
+// Copyright (c) 2022 Igara Studio S.A.
 // Copyright (c) 2001-2018 David Capello
 //
 // This file is released under the terms of the MIT license.
 // Read LICENSE.txt for more information.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "base/fstream_path.h"
@@ -21,10 +22,9 @@
 #include <sstream>
 #include <string>
 
-namespace doc {
-namespace file {
+namespace doc { namespace file {
 
-Palette* load_pal_file(const char *filename)
+std::unique_ptr<Palette> load_pal_file(const char* filename)
 {
   std::ifstream f(FSTREAM_PATH(filename));
   if (f.bad())
@@ -59,30 +59,29 @@ Palette* load_pal_file(const char *filename)
     if (line.empty())
       continue;
 
-    int r, g, b, a=255;
+    int r, g, b, a = 255;
     std::istringstream lineIn(line);
     lineIn >> r >> g >> b >> a;
     pal->addEntry(rgba(r, g, b, a));
   }
 
-  return pal.release();
+  return pal;
 }
 
-bool save_pal_file(const Palette *pal, const char *filename)
+bool save_pal_file(const Palette* pal, const char* filename)
 {
   std::ofstream f(FSTREAM_PATH(filename));
-  if (f.bad()) return false;
+  if (f.bad())
+    return false;
 
   f << "JASC-PAL\n"
     << "0100\n"
     << pal->size() << "\n";
 
   const bool hasAlpha = pal->hasAlpha();
-  for (int i=0; i<pal->size(); ++i) {
+  for (int i = 0; i < pal->size(); ++i) {
     uint32_t col = pal->getEntry(i);
-    f << ((int)rgba_getr(col)) << " "
-      << ((int)rgba_getg(col)) << " "
-      << ((int)rgba_getb(col));
+    f << ((int)rgba_getr(col)) << " " << ((int)rgba_getg(col)) << " " << ((int)rgba_getb(col));
     if (hasAlpha) {
       f << " " << ((int)rgba_geta(col));
     }
@@ -92,5 +91,4 @@ bool save_pal_file(const Palette *pal, const char *filename)
   return true;
 }
 
-} // namespace file
-} // namespace doc
+}} // namespace doc::file

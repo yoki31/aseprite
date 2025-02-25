@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2019  Igara Studio S.A.
+// Copyright (C) 2018-2024  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -21,8 +21,8 @@ class AppOptions {
 public:
   enum VerboseLevel {
     kNoVerbose,
-    kVerbose,
-    kHighlyVerbose,
+    kVerbose,       // --verbose
+    kHighlyVerbose, // --debug
   };
 
   typedef base::ProgramOptions PO;
@@ -41,9 +41,7 @@ public:
   bool showVersion() const { return m_showVersion; }
   VerboseLevel verboseLevel() const { return m_verboseLevel; }
 
-  const ValueList& values() const {
-    return m_po.values();
-  }
+  const ValueList& values() const { return m_po.values(); }
 
   // Export options
   const Option& saveAs() const { return m_saveAs; }
@@ -65,10 +63,12 @@ public:
   const Option& splitLayers() const { return m_splitLayers; }
   const Option& splitTags() const { return m_splitTags; }
   const Option& splitSlices() const { return m_splitSlices; }
+  const Option& splitGrid() const { return m_splitGrid; }
   const Option& layer() const { return m_layer; }
   const Option& allLayers() const { return m_allLayers; }
   const Option& ignoreLayer() const { return m_ignoreLayer; }
   const Option& tag() const { return m_tag; }
+  const Option& playSubtags() const { return m_playSubtags; }
   const Option& frameRange() const { return m_frameRange; }
   const Option& ignoreEmpty() const { return m_ignoreEmpty; }
   const Option& mergeDuplicates() const { return m_mergeDuplicates; }
@@ -78,19 +78,26 @@ public:
   const Option& trim() const { return m_trim; }
   const Option& trimSprite() const { return m_trimSprite; }
   const Option& trimByGrid() const { return m_trimByGrid; }
+  const Option& extrude() const { return m_extrude; }
   const Option& crop() const { return m_crop; }
   const Option& slice() const { return m_slice; }
   const Option& filenameFormat() const { return m_filenameFormat; }
+  const Option& tagnameFormat() const { return m_tagnameFormat; }
 #ifdef ENABLE_SCRIPTING
   const Option& script() const { return m_script; }
   const Option& scriptParam() const { return m_scriptParam; }
 #endif
   const Option& listLayers() const { return m_listLayers; }
+  const Option& listLayerHierarchy() const { return m_listLayerHierarchy; }
   const Option& listTags() const { return m_listTags; }
   const Option& listSlices() const { return m_listSlices; }
   const Option& oneFrame() const { return m_oneFrame; }
+  const Option& exportTileset() const { return m_exportTileset; }
 
   bool hasExporterParams() const;
+#ifdef ENABLE_STEAM
+  bool noInApp() const;
+#endif
 #ifdef _WIN32
   bool disableWintab() const;
 #endif
@@ -131,10 +138,12 @@ private:
   Option& m_splitLayers;
   Option& m_splitTags;
   Option& m_splitSlices;
+  Option& m_splitGrid;
   Option& m_layer;
   Option& m_allLayers;
   Option& m_ignoreLayer;
   Option& m_tag;
+  Option& m_playSubtags;
   Option& m_frameRange;
   Option& m_ignoreEmpty;
   Option& m_mergeDuplicates;
@@ -144,26 +153,32 @@ private:
   Option& m_trim;
   Option& m_trimSprite;
   Option& m_trimByGrid;
+  Option& m_extrude;
   Option& m_crop;
   Option& m_slice;
   Option& m_filenameFormat;
+  Option& m_tagnameFormat;
 #ifdef ENABLE_SCRIPTING
   Option& m_script;
   Option& m_scriptParam;
 #endif
   Option& m_listLayers;
+  Option& m_listLayerHierarchy;
   Option& m_listTags;
   Option& m_listSlices;
   Option& m_oneFrame;
+  Option& m_exportTileset;
 
   Option& m_verbose;
   Option& m_debug;
+#ifdef ENABLE_STEAM
+  Option& m_noInApp;
+#endif
 #ifdef _WIN32
   Option& m_disableWintab;
 #endif
   Option& m_help;
   Option& m_version;
-
 };
 
 } // namespace app

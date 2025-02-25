@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2019-2021  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/commands/filters/filter_manager_impl.h"
@@ -27,6 +27,7 @@
 #include "app/ui/palette_view.h"
 #include "app/ui/timeline/timeline.h"
 #include "app/ui_context.h"
+#include "app/util/cel_ops.h"
 #include "app/util/range_utils.h"
 #include "doc/algorithm/shrink_bounds.h"
 #include "doc/cel.h"
@@ -63,13 +64,12 @@ FilterManagerImpl::FilterManagerImpl(Context* context, Filter* filter)
   , m_target(TARGET_ALL_CHANNELS)
   , m_celsTarget(CelsTarget::Selected)
   , m_oldPalette(nullptr)
-  , m_progressDelegate(NULL)
+  , m_taskToken(&m_noToken)
+  , m_progressDelegate(nullptr)
 {
   int x, y;
   Image* image = m_site.image(&x, &y);
-  if (!image
-      || (m_site.layer() &&
-          m_site.layer()->isReference()))
+  if (!image || (m_site.layer() && m_site.layer()->isReference()))
     throw NoImageException();
 
   init(m_site.cel());
@@ -104,8 +104,7 @@ void FilterManagerImpl::setTarget(int target)
   m_target = target;
 
   // The alpha channel of the background layer can't be modified.
-  if (m_site.layer() &&
-      m_site.layer()->isBackground())
+  if (m_site.layer() && m_site.layer()->isBackground())
     m_target &= ~TARGET_ALPHA_CHANNEL;
 }
 
@@ -119,11 +118,10 @@ void FilterManagerImpl::begin()
   Doc* document = m_site.document();
 
   m_row = 0;
-  m_mask = (document->isMaskVisible() ? document->mask(): nullptr);
+  m_mask = (document->isMaskVisible() ? document->mask() : nullptr);
+  m_taskToken = &m_noToken; // Don't use the preview token (which can be canceled)
   updateBounds(m_mask);
 }
-
-#ifdef ENABLE_UI
 
 void FilterManagerImpl::beginForPreview()
 {
@@ -144,8 +142,7 @@ void FilterManagerImpl::beginForPreview()
   if (activeEditor->docPref().tiled.mode() == filters::TiledMode::NONE) {
     gfx::Rect vp;
     for (Editor* editor : UIContext::instance()->getAllEditorsIncludingPreview(document)) {
-      vp |= editor->screenToEditor(
-        View::getView(editor)->viewportBounds());
+      vp |= editor->screenToEditor(View::getView(editor)->viewportBounds());
     }
     vp &= m_site.sprite()->bounds();
     if (vp.isEmpty()) {
@@ -163,8 +160,6 @@ void FilterManagerImpl::beginForPreview()
   }
 }
 
-#endif // ENABLE_UI
-
 void FilterManagerImpl::end()
 {
   m_maskBits.unlock();
@@ -178,13 +173,12 @@ bool FilterManagerImpl::applyStep()
   if (m_mask && m_mask->bitmap()) {
     int x = m_bounds.x - m_mask->bounds().x;
     int y = m_bounds.y - m_mask->bounds().y + m_row;
-    if ((x >= m_bounds.w) ||
-        (y >= m_bounds.h))
+    if ((x >= m_bounds.w) || (y >= m_bounds.h))
       return false;
 
-    m_maskBits = m_mask->bitmap()
-      ->lockBits<BitmapTraits>(Image::ReadLock,
-        gfx::Rect(x, y, m_bounds.w - x, m_bounds.h - y));
+    m_maskBits = m_mask->bitmap()->lockBits<BitmapTraits>(
+      Image::ReadLock,
+      gfx::Rect(x, y, m_bounds.w - x, m_bounds.h - y));
 
     m_maskIterator = m_maskBits.begin();
   }
@@ -205,13 +199,15 @@ bool FilterManagerImpl::applyStep()
 
 void FilterManagerImpl::apply()
 {
+  CommandResult result;
   bool cancelled = false;
 
   begin();
   while (!cancelled && applyStep()) {
     if (m_progressDelegate) {
       // Report progress.
-      m_progressDelegate->reportProgress(m_progressBase + m_progressWidth * (m_row+1) / m_bounds.h);
+      m_progressDelegate->reportProgress(m_progressBase +
+                                         m_progressWidth * (m_row + 1) / m_bounds.h);
 
       // Does the user cancelled the whole process?
       cancelled = m_progressDelegate->isCancelled();
@@ -220,26 +216,40 @@ void FilterManagerImpl::apply()
 
   if (!cancelled) {
     gfx::Rect output;
-    if (algorithm::shrink_bounds2(m_src.get(), m_dst.get(),
-                                  m_bounds, output)) {
-      if (m_cel->layer()->isBackground()) {
-        (*m_tx)(
-          new cmd::CopyRegion(
-            m_cel->image(),
-            m_dst.get(),
-            gfx::Region(output),
-            position()));
+    if (algorithm::shrink_bounds2(m_src.get(), m_dst.get(), m_bounds, output)) {
+      if (m_cel->layer()->isTilemap()) {
+        modify_tilemap_cel_region(*m_tx,
+                                  m_cel,
+                                  nullptr,
+                                  gfx::Region(output),
+                                  m_site.tilesetMode(),
+                                  [this](const doc::ImageRef& origTile,
+                                         const gfx::Rect& tileBoundsInCanvas) -> doc::ImageRef {
+                                    return ImageRef(crop_image(m_dst.get(),
+                                                               tileBoundsInCanvas.x,
+                                                               tileBoundsInCanvas.y,
+                                                               tileBoundsInCanvas.w,
+                                                               tileBoundsInCanvas.h,
+                                                               m_dst->maskColor()));
+                                  });
+      }
+      else if (m_cel->layer()->isBackground()) {
+        (*m_tx)(new cmd::CopyRegion(m_cel->image(), m_dst.get(), gfx::Region(output), position()));
       }
       else {
         // Patch "m_cel"
-        (*m_tx)(
-          new cmd::PatchCel(
-            m_cel, m_dst.get(),
-            gfx::Region(output),
-            position()));
+        (*m_tx)(new cmd::PatchCel(m_cel, m_dst.get(), gfx::Region(output), position()));
       }
     }
+
+    result = CommandResult(CommandResult::kOk);
   }
+  else {
+    result = CommandResult(CommandResult::kCanceled);
+  }
+
+  ASSERT(m_reader.context());
+  m_reader.context()->setCommandResult(result);
 }
 
 void FilterManagerImpl::applyToTarget()
@@ -252,16 +262,13 @@ void FilterManagerImpl::applyToTarget()
   CelList cels;
 
   switch (m_celsTarget) {
-
     case CelsTarget::Selected: {
       auto range = m_site.range();
       if (range.enabled()) {
         for (Cel* cel : get_unique_cels_to_edit_pixels(m_site.sprite(), range))
           cels.push_back(cel);
       }
-      else if (m_site.cel() &&
-               m_site.layer() &&
-               m_site.layer()->canEditPixels()) {
+      else if (m_site.cel() && m_site.layer() && m_site.layer()->canEditPixels()) {
         cels.push_back(m_site.cel());
       }
       break;
@@ -283,7 +290,7 @@ void FilterManagerImpl::applyToTarget()
   }
 
   m_progressBase = 0.0f;
-  m_progressWidth = (cels.size() > 0 ? 1.0f / cels.size(): 1.0f);
+  m_progressWidth = (cels.size() > 0 ? 1.0f / cels.size() : 1.0f);
 
   std::set<ObjectId> visited;
 
@@ -291,15 +298,11 @@ void FilterManagerImpl::applyToTarget()
   if (paletteChange) {
     Palette newPalette = *getNewPalette();
     restoreSpritePalette();
-    (*m_tx)(
-      new cmd::SetPalette(m_site.sprite(),
-                          m_site.frame(), &newPalette));
+    (*m_tx)(new cmd::SetPalette(m_site.sprite(), m_site.frame(), &newPalette));
   }
 
   // For each target image
-  for (auto it = cels.begin();
-       it != cels.end() && !cancelled;
-       ++it) {
+  for (auto it = cels.begin(); it != cels.end() && !cancelled; ++it) {
     Image* image = (*it)->image();
 
     // Avoid applying the filter two times to the same image
@@ -324,9 +327,7 @@ void FilterManagerImpl::initTransaction()
 {
   ASSERT(!m_tx);
   m_writer.reset(new ContextWriter(m_reader));
-  m_tx.reset(new Tx(m_writer->context(),
-                    m_filter->getName(),
-                    ModifyDocument));
+  m_tx.reset(new Tx(*m_writer, m_filter->getName(), ModifyDocument));
 }
 
 bool FilterManagerImpl::isTransaction() const
@@ -343,8 +344,6 @@ void FilterManagerImpl::commitTransaction()
   m_writer.reset();
 }
 
-#ifdef ENABLE_UI
-
 void FilterManagerImpl::flush()
 {
   int h = m_row - m_nextRowToFlush;
@@ -360,14 +359,10 @@ void FilterManagerImpl::flush()
       // avoid screen artifacts when we apply filters like convolution
       // matrices.
       gfx::Rect rect(
-        editor->editorToScreen(
-          gfx::Point(
-            m_bounds.x,
-            m_bounds.y+m_nextRowToFlush-1)),
-        gfx::Size(
-          editor->projection().applyX(m_bounds.w),
-          (editor->projection().scaleY() >= 1 ? editor->projection().applyY(h+2):
-                                                editor->projection().removeY(h+2))));
+        editor->editorToScreen(gfx::Point(m_bounds.x, m_bounds.y + m_nextRowToFlush - 1)),
+        gfx::Size(editor->projection().applyX(m_bounds.w),
+                  (editor->projection().scaleY() >= 1 ? editor->projection().applyY(h + 2) :
+                                                        editor->projection().removeY(h + 2))));
 
       gfx::Region reg1(rect);
       editor->expandRegionByTiledMode(reg1, true);
@@ -379,7 +374,7 @@ void FilterManagerImpl::flush()
       editor->invalidateRegion(reg1);
     }
 
-    m_nextRowToFlush = m_row+1;
+    m_nextRowToFlush = m_row + 1;
   }
 }
 
@@ -395,16 +390,14 @@ void FilterManagerImpl::disablePreview()
   }
 }
 
-#endif  // ENABLE_UI
-
 const void* FilterManagerImpl::getSourceAddress()
 {
-  return m_src->getPixelAddress(m_bounds.x, m_bounds.y+m_row);
+  return m_src->getPixelAddress(m_bounds.x, m_bounds.y + m_row);
 }
 
 void* FilterManagerImpl::getDestinationAddress()
 {
-  return m_dst->getPixelAddress(m_bounds.x, m_bounds.y+m_row);
+  return m_dst->getPixelAddress(m_bounds.x, m_bounds.y + m_row);
 }
 
 bool FilterManagerImpl::skipPixel()
@@ -451,14 +444,11 @@ void FilterManagerImpl::init(Cel* cel)
   ASSERT(cel);
 
   Doc* doc = m_site.document();
-  if (!updateBounds(doc->isMaskVisible() ? doc->mask(): nullptr))
+  if (!updateBounds(doc->isMaskVisible() ? doc->mask() : nullptr))
     throw InvalidAreaException();
 
   m_cel = cel;
-  m_src.reset(
-    crop_image(
-      cel->image(),
-      gfx::Rect(m_site.sprite()->bounds()).offset(-cel->position()), 0));
+  m_src = crop_cel_image(cel, 0);
   m_dst.reset(Image::createCopy(m_src.get()));
 
   m_row = -1;
@@ -494,9 +484,7 @@ bool FilterManagerImpl::updateBounds(doc::Mask* mask)
 
 bool FilterManagerImpl::paletteHasChanged()
 {
-  return
-    (m_oldPalette &&
-     getPalette()->countDiff(getNewPalette(), nullptr, nullptr));
+  return (m_oldPalette && getPalette()->countDiff(getNewPalette(), nullptr, nullptr));
 }
 
 void FilterManagerImpl::restoreSpritePalette()
@@ -511,19 +499,26 @@ void FilterManagerImpl::applyToPaletteIfNeeded()
   m_filter->applyToPalette(this);
 }
 
-#ifdef ENABLE_UI
-
 void FilterManagerImpl::redrawColorPalette()
 {
   set_current_palette(getNewPalette(), false);
   ColorBar::instance()->invalidate();
 }
 
-#endif // ENABLE_UI
-
 bool FilterManagerImpl::isMaskActive() const
 {
   return m_site.document()->isMaskVisible();
+}
+
+base::task_token& FilterManagerImpl::taskToken() const
+{
+  ASSERT(m_taskToken); // It's always pointing to a token, m_noToken by default
+  return *m_taskToken;
+}
+
+void FilterManagerImpl::setTaskToken(base::task_token& token)
+{
+  m_taskToken = &token;
 }
 
 } // namespace app

@@ -5,15 +5,14 @@
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
 #include "app/commands/command.h"
-#include "app/modules/editors.h"
+#include "app/context.h"
 #include "app/ui/editor/editor.h"
 #include "ui/base.h"
-#include "app/context.h"
 
 namespace app {
 

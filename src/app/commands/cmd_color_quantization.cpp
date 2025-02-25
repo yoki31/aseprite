@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2019-2020 Igara Studio S.A.
+// Copyright (C) 2019-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
@@ -20,10 +20,12 @@
 #include "app/sprite_job.h"
 #include "app/transaction.h"
 #include "app/ui/color_bar.h"
+#include "app/ui/rgbmap_algorithm_selector.h"
 #include "app/ui_context.h"
 #include "doc/palette.h"
 #include "doc/sprite.h"
 #include "render/quantization.h"
+#include "ui/manager.h"
 
 #include "palette_from_sprite.xml.h"
 
@@ -32,10 +34,31 @@
 namespace app {
 
 struct ColorQuantizationParams : public NewParams {
-  Param<bool> ui { this, true, "ui" };
-  Param<bool> withAlpha { this, true, "withAlpha" };
-  Param<int> maxColors { this, 256, "maxColors" };
-  Param<bool> useRange { this, false, "useRange" };
+  Param<bool> ui{ this, true, "ui" };
+  Param<bool> withAlpha{ this, true, "withAlpha" };
+  Param<int> maxColors{ this, 256, "maxColors" };
+  Param<bool> useRange{ this, false, "useRange" };
+  Param<RgbMapAlgorithm> algorithm{ this, RgbMapAlgorithm::DEFAULT, "algorithm" };
+};
+
+class PaletteFromSpriteWindow : public app::gen::PaletteFromSprite {
+public:
+  PaletteFromSpriteWindow()
+  {
+    rgbmapAlgorithmPlaceholder()->addChild(&m_algoSelector);
+
+    advancedCheck()->Click.connect([this]() {
+      advanced()->setVisible(advancedCheck()->isSelected());
+      expandWindow(sizeHint());
+    });
+  }
+
+  doc::RgbMapAlgorithm algorithm() { return m_algoSelector.algorithm(); }
+
+  void algorithm(const doc::RgbMapAlgorithm mapAlgo) { m_algoSelector.algorithm(mapAlgo); }
+
+private:
+  RgbMapAlgorithmSelector m_algoSelector;
 };
 
 class ColorQuantizationCommand : public CommandWithNewParams<ColorQuantizationParams> {
@@ -48,9 +71,7 @@ protected:
 };
 
 ColorQuantizationCommand::ColorQuantizationCommand()
-  : CommandWithNewParams<ColorQuantizationParams>(
-      CommandId::ColorQuantization(),
-      CmdRecordableFlag)
+  : CommandWithNewParams<ColorQuantizationParams>(CommandId::ColorQuantization(), CmdRecordableFlag)
 {
 }
 
@@ -61,44 +82,46 @@ bool ColorQuantizationCommand::onEnabled(Context* ctx)
 
 void ColorQuantizationCommand::onExecute(Context* ctx)
 {
-#ifdef ENABLE_UI
   const bool ui = (params().ui() && ctx->isUIAvailable());
-#endif
-
+  auto& pref = Preferences::instance();
   bool withAlpha = params().withAlpha();
   int maxColors = params().maxColors();
+  RgbMapAlgorithm algorithm = params().algorithm();
   bool createPal;
 
   Site site = ctx->activeSite();
   PalettePicks entries = site.selectedColors();
 
-#ifdef ENABLE_UI
   if (ui) {
-    app::gen::PaletteFromSprite window;
+    PaletteFromSpriteWindow window;
     {
       ContextReader reader(ctx);
       const Palette* curPalette = site.sprite()->palette(site.frame());
 
+      if (!params().algorithm.isSet())
+        algorithm = pref.quantization.rgbmapAlgorithm();
       if (!params().withAlpha.isSet())
-        withAlpha = App::instance()->preferences().quantization.withAlpha();
+        withAlpha = pref.quantization.withAlpha();
 
+      const bool advanced = pref.quantization.advanced();
+      window.advancedCheck()->setSelected(advanced);
+      window.advanced()->setVisible(advanced);
+
+      window.algorithm(algorithm);
       window.newPalette()->setSelected(true);
-      window.alphaChannel()->setSelected(withAlpha);
       window.ncolors()->setTextf("%d", maxColors);
 
       if (entries.picks() > 1) {
-        window.currentRange()->setTextf(
-          "%s, %d color(s)",
-          window.currentRange()->text().c_str(),
-          entries.picks());
+        window.currentRange()->setTextf("%s, %d color(s)",
+                                        window.currentRange()->text().c_str(),
+                                        entries.picks());
       }
       else
         window.currentRange()->setEnabled(false);
 
-      window.currentPalette()->setTextf(
-        "%s, %d color(s)",
-        window.currentPalette()->text().c_str(),
-        curPalette->size());
+      window.currentPalette()->setTextf("%s, %d color(s)",
+                                        window.currentPalette()->text().c_str(),
+                                        curPalette->size());
     }
 
     window.openWindowInForeground();
@@ -107,7 +130,10 @@ void ColorQuantizationCommand::onExecute(Context* ctx)
 
     maxColors = window.ncolors()->textInt();
     withAlpha = window.alphaChannel()->isSelected();
-    App::instance()->preferences().quantization.withAlpha(withAlpha);
+    algorithm = window.algorithm();
+
+    pref.quantization.withAlpha(withAlpha);
+    pref.quantization.advanced(window.advancedCheck()->isSelected());
 
     if (window.newPalette()->isSelected()) {
       createPal = true;
@@ -120,9 +146,7 @@ void ColorQuantizationCommand::onExecute(Context* ctx)
       }
     }
   }
-  else
-#endif // ENABLE_UI
-  {
+  else {
     createPal = (!params().useRange());
   }
 
@@ -134,44 +158,54 @@ void ColorQuantizationCommand::onExecute(Context* ctx)
     return;
 
   try {
-    ContextReader reader(ctx);
+    Doc* doc = site.document();
     Sprite* sprite = site.sprite();
     frame_t frame = site.frame();
     const Palette* curPalette = site.sprite()->palette(frame);
     Palette tmpPalette(frame, entries.picks());
 
-    SpriteJob job(reader, "Color Quantization");
-    const bool newBlend = Preferences::instance().experimental.newBlend();
-    job.startJobWithCallback(
-      [sprite, withAlpha, &tmpPalette, &job, newBlend]{
-        render::create_palette_from_sprite(
-          sprite, 0, sprite->lastFrame(),
-          withAlpha, &tmpPalette,
-          &job,
-          newBlend);     // SpriteJob is a render::TaskDelegate
-      });
+    SpriteJob job(ctx, doc, "Color Quantization", ui);
+    const bool newBlend = pref.experimental.newBlend();
+    job.startJobWithCallback([sprite,
+                              withAlpha,
+                              curPalette,
+                              &tmpPalette,
+                              &job,
+                              &entries,
+                              newBlend,
+                              algorithm,
+                              createPal,
+                              site,
+                              frame](Tx& tx) {
+      render::create_palette_from_sprite(sprite,
+                                         0,
+                                         sprite->lastFrame(),
+                                         withAlpha,
+                                         &tmpPalette,
+                                         &job, // SpriteJob is a render::TaskDelegate
+                                         newBlend,
+                                         algorithm);
+
+      std::unique_ptr<Palette> newPalette(new Palette(createPal ? tmpPalette : *site.palette()));
+
+      if (createPal) {
+        entries = PalettePicks(newPalette->size());
+        entries.all();
+      }
+
+      int i = 0, j = 0;
+      for (bool state : entries) {
+        if (state)
+          newPalette->setEntry(i, tmpPalette.getEntry(j++));
+        ++i;
+      }
+
+      if (*curPalette != *newPalette)
+        tx(new cmd::SetPalette(sprite, frame, newPalette.get()));
+    });
     job.waitJob();
     if (job.isCanceled())
       return;
-
-    std::unique_ptr<Palette> newPalette(
-      new Palette(createPal ? tmpPalette:
-                              *site.palette()));
-
-    if (createPal) {
-      entries = PalettePicks(newPalette->size());
-      entries.all();
-    }
-
-    int i = 0, j = 0;
-    for (bool state : entries) {
-      if (state)
-        newPalette->setEntry(i, tmpPalette.getEntry(j++));
-      ++i;
-    }
-
-    if (*curPalette != *newPalette)
-      job.tx()(new cmd::SetPalette(sprite, frame, newPalette.get()));
   }
   catch (const base::Exception& e) {
     Console::showException(e);

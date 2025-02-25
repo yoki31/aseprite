@@ -1,12 +1,12 @@
 // Aseprite
-// Copyright (C) 2019  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
@@ -15,7 +15,6 @@
 #include "app/color_utils.h"
 #include "app/commands/command.h"
 #include "app/context_access.h"
-#include "app/modules/editors.h"
 #include "app/modules/gui.h"
 #include "app/tools/tool_box.h"
 #include "app/tx.h"
@@ -39,8 +38,7 @@ protected:
   void onExecute(Context* context) override;
 };
 
-MaskContentCommand::MaskContentCommand()
-  : Command(CommandId::MaskContent(), CmdRecordableFlag)
+MaskContentCommand::MaskContentCommand() : Command(CommandId::MaskContent(), CmdRecordableFlag)
 {
 }
 
@@ -66,7 +64,7 @@ void MaskContentCommand::onExecute(Context* context)
       ColorPicker picker;
       picker.pickColor(*writer.site(),
                        gfx::PointF(0.0, 0.0),
-                       current_editor->projection(),
+                       Editor::activeEditor()->projection(),
                        ColorPicker::FromComposition);
       color = color_utils::color_for_layer(picker.color(), writer.layer());
     }
@@ -75,22 +73,22 @@ void MaskContentCommand::onExecute(Context* context)
 
     Mask newMask;
     gfx::Rect imgBounds = cel->image()->bounds();
-    if (algorithm::shrink_bounds(cel->image(), imgBounds, color)) {
-      newMask.replace(imgBounds.offset(cel->bounds().origin()));
+    if (algorithm::shrink_cel_bounds(cel, color, imgBounds)) {
+      newMask.replace(imgBounds);
     }
     else {
       newMask.replace(cel->bounds());
     }
 
-    Tx tx(writer.context(), "Select Content", DoesntModifyDocument);
+    Tx tx(writer, "Select Content", DoesntModifyDocument);
     tx(new cmd::SetMask(document, &newMask));
     document->resetTransformation();
     tx.commit();
   }
 
   // Select marquee tool
-  if (tools::Tool* tool = App::instance()->toolBox()
-      ->getToolById(tools::WellKnownTools::RectangularMarquee)) {
+  if (tools::Tool* tool = App::instance()->toolBox()->getToolById(
+        tools::WellKnownTools::RectangularMarquee)) {
     ToolBar::instance()->selectTool(tool);
   }
 

@@ -5,7 +5,7 @@
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/cmd/set_cel_data.h"
@@ -14,11 +14,11 @@
 #include "doc/image.h"
 #include "doc/image_io.h"
 #include "doc/image_ref.h"
+#include "doc/layer.h"
 #include "doc/sprite.h"
 #include "doc/subobjects_io.h"
 
-namespace app {
-namespace cmd {
+namespace app { namespace cmd {
 
 using namespace doc;
 
@@ -81,8 +81,7 @@ void SetCelData::createCopy()
 
   ASSERT(!m_dataCopy);
   m_dataCopy.reset(new CelData(*cel->data()));
-  m_dataCopy->setImage(ImageRef(Image::createCopy(cel->image())));
+  m_dataCopy->setImage(ImageRef(Image::createCopy(cel->image())), cel->layer());
 }
 
-} // namespace cmd
-} // namespace app
+}} // namespace app::cmd

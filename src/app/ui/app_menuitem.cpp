@@ -1,18 +1,19 @@
 // Aseprite
-// Copyright (C) 2019-2020  Igara Studio S.A.
+// Copyright (C) 2019-2022  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/ui/app_menuitem.h"
 
 #include "app/app_menus.h"
 #include "app/commands/command.h"
+#include "app/commands/commands.h"
 #include "app/commands/params.h"
 #include "app/modules/gui.h"
 #include "app/ui/keyboard_shortcuts.h"
@@ -35,15 +36,22 @@ using namespace ui;
 Params AppMenuItem::s_contextParams;
 
 AppMenuItem::AppMenuItem(const std::string& text,
-                         Command* command,
+                         const std::string& commandId,
                          const Params& params)
- : MenuItem(text)
- , m_key(nullptr)
- , m_command(command)
- , m_params(params)
- , m_isRecentFileItem(false)
- , m_native(nullptr)
+  : MenuItem(text)
+  , m_key(nullptr)
+  , m_commandId(commandId)
+  , m_params(params)
+  , m_native(nullptr)
 {
+}
+
+Command* AppMenuItem::getCommand() const
+{
+  if (!m_commandId.empty())
+    return Commands::instance()->byId(m_commandId.c_str());
+  else
+    return nullptr;
 }
 
 void AppMenuItem::setKey(const KeyPtr& key)
@@ -72,7 +80,7 @@ void AppMenuItem::syncNativeMenuItemKeyShortcut()
 
     m_native->shortcut = shortcut;
     m_native->menuItem->setShortcut(shortcut);
-    m_native->keyContext = (m_key ? m_key->keycontext(): KeyContext::Any);
+    m_native->keyContext = (m_key ? m_key->keycontext() : KeyContext::Any);
   }
 }
 
@@ -85,10 +93,13 @@ void AppMenuItem::setContextParams(const Params& params)
 bool AppMenuItem::onProcessMessage(Message* msg)
 {
   switch (msg->type()) {
-
     case kCloseMessage:
-      // disable the menu (the keyboard shortcuts are processed by "manager_msg_proc")
-      setEnabled(false);
+      // Don't disable items with submenus
+      if (!hasSubmenu()) {
+        // Disable the menu item (the keyboard shortcuts are processed
+        // by "manager_msg_proc")
+        setEnabled(false);
+      }
       break;
   }
 
@@ -100,18 +111,12 @@ void AppMenuItem::onSizeHint(SizeHintEvent& ev)
   gfx::Size size(0, 0);
 
   if (hasText()) {
-    size.w =
-      + textWidth()
-      + (inBar() ? childSpacing()/4: childSpacing())
-      + border().width();
+    size.w = +textWidth() + (inBar() ? childSpacing() / 4 : childSpacing()) + border().width();
 
-    size.h =
-      + textHeight()
-      + border().height();
+    size.h = +textHeight() + border().height();
 
     if (m_key && !m_key->accels().empty()) {
-      size.w += Graphics::measureUITextLength(
-        m_key->accels().front().toString().c_str(), font());
+      size.w += Graphics::measureUITextLength(m_key->accels().front().toString().c_str(), font());
     }
   }
 
@@ -122,18 +127,22 @@ void AppMenuItem::onClick()
 {
   MenuItem::onClick();
 
-  if (m_command) {
+  if (!m_commandId.empty()) {
     Params params = m_params;
     if (!s_contextParams.empty())
       params |= s_contextParams;
 
     // Load parameters to call Command::isEnabled, so we can check if
     // the command is enabled with this parameters.
-    m_command->loadParams(params);
+    if (auto command = getCommand()) {
+      command->loadParams(params);
 
-    UIContext* context = UIContext::instance();
-    if (m_command->isEnabled(context)) {
-      context->executeCommandFromMenuOrShortcut(m_command, params);
+      UIContext* context = UIContext::instance();
+      if (command->isEnabled(context))
+        context->executeCommandFromMenuOrShortcut(command, params);
+
+      // TODO At this point, the "this" pointer might be deleted if
+      //      the command reloaded the App main menu
     }
   }
 }
@@ -146,15 +155,15 @@ void AppMenuItem::onValidate()
   Context* context = UIContext::instance();
   context->updateFlags();
 
-  if (m_command) {
+  if (auto command = getCommand()) {
     Params params = m_params;
     if (!s_contextParams.empty())
       params |= s_contextParams;
 
-    m_command->loadParams(params);
+    command->loadParams(params);
 
-    setEnabled(m_command->isEnabled(context));
-    setSelected(m_command->isChecked(context));
+    setEnabled(command->isEnabled(context));
+    setSelected(command->isChecked(context));
   }
 }
 

@@ -5,17 +5,17 @@
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/cmd/unlink_cel.h"
 
 #include "doc/cel.h"
 #include "doc/image.h"
+#include "doc/layer.h"
 #include "doc/sprite.h"
 
-namespace app {
-namespace cmd {
+namespace app { namespace cmd {
 
 using namespace doc;
 
@@ -36,7 +36,7 @@ void UnlinkCel::onExecute()
 
   ImageRef imgCopy(Image::createCopy(oldCelData->image()));
   CelDataRef celDataCopy(new CelData(*oldCelData));
-  celDataCopy->setImage(imgCopy);
+  celDataCopy->setImage(imgCopy, cel->layer());
   celDataCopy->setUserData(oldCelData->userData());
 
   if (m_newImageId) {
@@ -62,5 +62,4 @@ void UnlinkCel::onUndo()
   cel->incrementVersion();
 }
 
-} // namespace cmd
-} // namespace app
+}} // namespace app::cmd

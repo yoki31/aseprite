@@ -1,17 +1,19 @@
 // Aseprite
+// Copyright (C) 2019  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+  #include "config.h"
 #endif
 
 #include "app/app.h"
 #include "app/commands/command.h"
 #include "app/context_access.h"
 #include "app/doc_api.h"
+#include "app/i18n/strings.h"
 #include "app/modules/gui.h"
 #include "app/tx.h"
 #include "app/ui/status_bar.h"
@@ -30,8 +32,7 @@ protected:
   void onExecute(Context* context) override;
 };
 
-ClearCelCommand::ClearCelCommand()
-  : Command(CommandId::ClearCel(), CmdRecordableFlag)
+ClearCelCommand::ClearCelCommand() : Command(CommandId::ClearCel(), CmdRecordableFlag)
 {
 }
 
@@ -46,12 +47,10 @@ void ClearCelCommand::onExecute(Context* context)
   Doc* document(writer.document());
   bool nonEditableLayers = false;
   {
-    Tx tx(writer.context(), "Clear Cel");
+    Tx tx(writer, "Clear Cel");
 
     const Site* site = writer.site();
-    if (site->inTimeline() &&
-        !site->selectedLayers().empty() &&
-        !site->selectedFrames().empty()) {
+    if (site->inTimeline() && !site->selectedLayers().empty() && !site->selectedFrames().empty()) {
       for (Layer* layer : site->selectedLayers()) {
         if (!layer->isImage())
           continue;
@@ -61,11 +60,9 @@ void ClearCelCommand::onExecute(Context* context)
           continue;
         }
 
-        LayerImage* layerImage = static_cast<LayerImage*>(layer);
-
         for (frame_t frame : site->selectedFrames().reversed()) {
-          if (layerImage->cel(frame))
-            document->getApi(tx).clearCel(layerImage, frame);
+          if (Cel* cel = layer->cel(frame))
+            document->getApi(tx).clearCel(cel);
         }
       }
     }
@@ -80,8 +77,7 @@ void ClearCelCommand::onExecute(Context* context)
   }
 
   if (nonEditableLayers)
-    StatusBar::instance()->showTip(1000,
-      "There are locked layers");
+    StatusBar::instance()->showTip(1000, Strings::statusbar_tips_locked_layers());
 
   update_screen_for_document(document);
 }

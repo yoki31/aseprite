@@ -1,5 +1,5 @@
 # Aseprite
-# Copyright (C) 2021  Igara Studio S.A.
+# Copyright (C) 2021-2024  Igara Studio S.A.
 # Copyright (C) 2001-2018  David Capello
 
 include_directories(.)
@@ -15,7 +15,7 @@ endif()
 if(NOT USE_SHARED_ZLIB)
   set(SKIP_INSTALL_ALL on)
   # Don't build zlib tests
-  set(ZLIB_TESTS OFF CACHE BOOL "Build zlib tests")
+  set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "Enable Zlib Examples")
   add_subdirectory(zlib)
 endif()
 
@@ -33,7 +33,7 @@ if(NOT USE_SHARED_GIFLIB)
   add_subdirectory(giflib)
 endif()
 
-if(WITH_WEBP_SUPPORT)
+if(ENABLE_WEBP AND NOT LAF_BACKEND STREQUAL "skia")
   set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "Build extras.")
   set(WEBP_BUILD_ANIM_UTILS OFF CACHE BOOL "Build animation utilities.")
   set(WEBP_BUILD_CWEBP OFF CACHE BOOL "Build the cwebp command line tool.")
@@ -54,23 +54,22 @@ if(WITH_WEBP_SUPPORT)
 endif()
 
 if(NOT USE_SHARED_TINYXML)
-  add_subdirectory(tinyxml)
+  set(tinyxml2_BUILD_TESTING OFF CACHE BOOL "Build tests for tinyxml2")
+  add_subdirectory(tinyxml2)
+endif()
+
+if(NOT USE_SHARED_TINYEXIF)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "build as shared library")
+  set(BUILD_STATIC_LIBS ON CACHE BOOL "build as static library")
+  set(LINK_CRT_STATIC_LIBS OFF CACHE BOOL "link CRT static library")
+  set(BUILD_DEMO OFF CACHE BOOL "build demo binary")
+  add_subdirectory(TinyEXIF)
 endif()
 
 if(REQUIRE_CURL AND NOT USE_SHARED_CURL)
   set(BUILD_RELEASE_DEBUG_DIRS ON BOOL)
   set(BUILD_CURL_EXE OFF CACHE BOOL "Set to ON to build curl executable.")
-
-  # SSL/TLS support (use native libraries only)
-  set(CMAKE_USE_OPENSSL OFF CACHE BOOL "Use OpenSSL code. Experimental")
-  set(CMAKE_USE_LIBSSH2 OFF CACHE BOOL "Use libSSH2")
-  if(WIN32)
-    set(CMAKE_USE_SCHANNEL ON CACHE BOOL "enable Windows native SSL/TLS")
-  elseif(APPLE)
-    set(CMAKE_USE_SECTRANSP ON CACHE BOOL "enable Apple OS native SSL/TLS")
-  else()
-    # TODO Linux?
-  endif()
+  set(CURL_DISABLE_TESTS ON CACHE BOOL "Disable Curl tests")
 
   add_subdirectory(curl)
 endif()
@@ -79,11 +78,23 @@ if(NOT USE_SHARED_PIXMAN)
   add_subdirectory(pixman-cmake)
 endif()
 
-if(NOT USE_SHARED_FREETYPE)
+if(NOT USE_SHARED_FREETYPE AND NOT LAF_BACKEND STREQUAL "skia")
   set(SKIP_INSTALL_ALL on)
   set(WITH_BZip2 OFF CACHE BOOL "")
 
   add_subdirectory(freetype2)
+
+  target_compile_definitions(freetype PUBLIC
+    FT_CONFIG_OPTION_SYSTEM_ZLIB)
+  if(UNIX)
+    target_include_directories(freetype BEFORE PUBLIC
+      ${CMAKE_CURRENT_BINARY_DIR}/freetype2/include)
+  endif()
+
+  if(HARFBUZZ_FOUND)
+    target_link_libraries(freetype PRIVATE ${HARFBUZZ_LIBRARIES})
+    target_include_directories(freetype PRIVATE ${HARFBUZZ_INCLUDE_DIRS})
+  endif()
 
   if(NOT USE_SHARED_LIBPNG)
     add_dependencies(freetype ${PNG_LIBRARIES})
@@ -119,6 +130,9 @@ endif()
 add_subdirectory(json11)
 
 # libarchive
+set(HAVE_WCSCPY 1)
+set(HAVE_WCSLEN 1)
+
 set(ENABLE_WERROR OFF CACHE BOOL "Treat warnings as errors - default is ON for Debug, OFF otherwise.")
 set(ENABLE_TEST OFF CACHE BOOL "Enable unit and regression tests")
 set(ENABLE_COVERAGE OFF CACHE BOOL "Enable code coverage (GCC only, automatically sets ENABLE_TEST to ON)")
@@ -128,10 +142,12 @@ set(ENABLE_LZMA OFF CACHE BOOL "Enable the use of the system LZMA library if fou
 set(ENABLE_ZSTD OFF CACHE BOOL "Enable the use of the system zstd library if found")
 set(ENABLE_CNG OFF CACHE BOOL "Enable the use of CNG(Crypto Next Generation)")
 set(ENABLE_BZip2 OFF CACHE BOOL "Enable the use of the system BZip2 library if found")
+set(ENABLE_EXPAT OFF CACHE BOOL "Enable the use of the system EXPAT library if found")
 set(ENABLE_LIBXML2 OFF CACHE BOOL "Enable the use of the system libxml2 library if found")
 set(ENABLE_CAT OFF CACHE BOOL "Enable cat building")
 set(ENABLE_TAR OFF CACHE BOOL "Enable tar building")
 set(ENABLE_CPIO OFF CACHE BOOL "Enable cpio building")
+set(ENABLE_LIBB2 OFF CACHE BOOL "Enable the use of the system LIBB2 library if found")
 add_subdirectory(libarchive)
 target_include_directories(archive_static INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libarchive/libarchive>)
@@ -145,6 +161,9 @@ endif()
 # tinyexpr
 add_library(tinyexpr tinyexpr/tinyexpr.c)
 target_include_directories(tinyexpr PUBLIC tinyexpr)
+
+# cityhash
+add_subdirectory(cityhash)
 
 # lua
 if(ENABLE_SCRIPTING)
@@ -183,12 +202,28 @@ if(ENABLE_SCRIPTING)
     lua/lstrlib.c
     lua/ltablib.c
     lua/lutf8lib.c)
-  target_compile_definitions(lua PUBLIC LUA_FLOORN2I=1)
+
+  if(WIN32)
+    # LUA_USE_WINDOWS is defined in luaconf.h when we compile with _WIN32
+    #target_compile_definitions(lua PUBLIC LUA_USE_WINDOWS=1)
+  elseif(APPLE)
+    target_compile_definitions(lua PUBLIC LUA_USE_MACOSX=1)
+  elseif(UNIX)
+    target_compile_definitions(lua PUBLIC LUA_USE_LINUX=1)
+  endif()
+
+  # Compile Lua C files as C++ to control errors with exceptions and
+  # have stack unwinding (i.e. calling destructors correctly).
+  file(GLOB all_lua_source_files lua/*.c)
+  set_source_files_properties(${all_lua_source_files} PROPERTIES LANGUAGE CXX)
+
+  target_compile_definitions(lua PUBLIC LUA_FLOORN2I=F2Ifloor)
   target_compile_definitions(lualib PRIVATE HAVE_SYSTEM)
   target_include_directories(lua PUBLIC lua)
   target_include_directories(lauxlib PUBLIC lua)
   target_include_directories(lualib PUBLIC lua)
   target_link_libraries(lauxlib lua)
+  target_link_libraries(lualib lua)
 
   # ixwebsocket
   if(ENABLE_WEBSOCKET)
@@ -198,3 +233,7 @@ if(ENABLE_SCRIPTING)
   endif()
 
 endif()
+
+# qoi
+add_library(qoi INTERFACE)
+target_include_directories(qoi INTERFACE qoi)
